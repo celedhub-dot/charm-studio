@@ -57,6 +57,13 @@ npm install && npm start
 
 Open http://localhost:3000.
 
+**Local and live share one database.** If your local `backend/.env` uses the same `DATABASE_URL` as Render, also set `DB_SCHEMA=charm_dev` there. Local data then lives in its own schema and never touches the live account or orders. To create a local test account (this skips the password rules, so simple test passwords work; it refuses to run without `DB_SCHEMA`):
+
+```bash
+cd backend
+.venv/Scripts/python.exe scripts/seed_dev_account.py --email test@charm.local --password <test-password>
+```
+
 ## Logging in and your account
 
 - **First login:** enter the `ADMIN_PASSWORD` from the server's environment. The app then asks for your name, email and a new password, which is stored hashed (scrypt) in the database. After that you always log in with **email + password**, and `ADMIN_PASSWORD` is no longer used (you can delete it).
