@@ -66,7 +66,16 @@ Push the repo to GitHub first; both Render and Vercel deploy from it and redeplo
 
 **Backend on Render**
 
-1. In Render, choose **New → Blueprint**, pick the repo, and Render reads `render.yaml`. It creates `charm-studio-api`, a Python web service (`uvicorn server:app --host 0.0.0.0 --port $PORT`).
+1. In Render, choose **New → Blueprint**, pick the repo, and Render reads `render.yaml`. It creates `charm-studio-api`, a Python web service on the **free** plan (`plan: free`) running `uvicorn server:app --host 0.0.0.0 --port $PORT`.
+
+   If Render still asks for payment details, create the service by hand instead, without a Blueprint: **New → Web Service**, pick the repo, then set:
+   - Root Directory: `backend`
+   - Runtime: Python
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `uvicorn server:app --host 0.0.0.0 --port $PORT`
+   - Instance Type: **Free**
+   - Health Check Path: `/api/health`
+   - Environment variables: the ones listed in `render.yaml`, plus `PYTHON_VERSION=3.11.9` and an `AUTH_SECRET` you generate yourself (`python -c "import secrets; print(secrets.token_urlsafe(48))"`)
 2. Fill in the secrets Render asks for: `DATABASE_URL`, `ADMIN_PASSWORD` (the password you'll log in with; `AUTH_SECRET` is generated for you), the AI key (`ANTHROPIC_API_KEY`, or `OLLAMA_API_KEY` + `OLLAMA_MODEL` with `AI_PROVIDER=ollama`), and the `WA_MAIN_*` values. Leave `CORS_ORIGINS` for now.
 3. `WA_VERIFY_TOKEN` is generated for you. Copy its value from the service's Environment tab into the Meta console.
 4. Note the API URL, e.g. `https://charm-studio-api.onrender.com`, and check `https://…/api/health` returns `{"ok":true}`.

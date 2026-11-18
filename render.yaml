@@ -5,6 +5,7 @@ services:
   - type: web
     name: charm-studio-api
     runtime: python
+    plan: free # without this, Blueprints create a paid instance. Change to "starter" for always-on.
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
