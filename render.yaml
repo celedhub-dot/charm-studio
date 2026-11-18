@@ -1,0 +1,40 @@
+# Render Blueprint for the API: New -> Blueprint -> pick the GitHub repo.
+# The frontend is deployed on Vercel (see frontend/vercel.json); the database is Supabase.
+# Secrets marked sync:false are asked for in the Render dashboard on first deploy.
+services:
+  - type: web
+    name: charm-studio-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        sync: false # Supabase Session pooler URI
+      - key: CORS_ORIGINS
+        sync: false # your Vercel URL, e.g. https://charm-studio.vercel.app
+      - key: CORS_ORIGIN_REGEX
+        sync: false # optional, e.g. https://charm-studio-.*\.vercel\.app for preview deploys
+      - key: AI_PROVIDER
+        value: anthropic # or: ollama
+      - key: ANTHROPIC_API_KEY
+        sync: false # needed when AI_PROVIDER=anthropic
+      - key: OLLAMA_API_KEY
+        sync: false # needed when AI_PROVIDER=ollama (Ollama Cloud)
+      - key: OLLAMA_MODEL
+        sync: false # needed when AI_PROVIDER=ollama
+      - key: WA_GRAPH_VERSION
+        value: v20.0
+      - key: WA_VERIFY_TOKEN
+        generateValue: true
+      - key: WA_NUMBERS
+        value: main
+      - key: WA_MAIN_PHONE_ID
+        sync: false
+      - key: WA_MAIN_TOKEN
+        sync: false
+      - key: WA_MAIN_DISPLAY
+        sync: false
