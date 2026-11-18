@@ -6,11 +6,14 @@ All routes are mounted under /api.
 import asyncio
 import base64
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -25,6 +28,7 @@ from dotenv import load_dotenv
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Depends,
     FastAPI,
     File,
     Form,
@@ -130,7 +134,118 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Charm.Studio API", lifespan=lifespan)
-api = APIRouter(prefix="/api")
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+#
+# Single-seller app: one admin password (ADMIN_PASSWORD). POST /api/auth/login
+# exchanges it for a signed, expiring bearer token; every other /api route needs
+# "Authorization: Bearer <token>" except the public ones (health, WhatsApp webhook).
+#
+# Tokens are HMAC-SHA256 signed with a key derived from AUTH_SECRET *and*
+# ADMIN_PASSWORD, so changing either one logs every device out.
+# ---------------------------------------------------------------------------
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+AUTH_SECRET = os.environ.get("AUTH_SECRET", "")
+AUTH_TOKEN_DAYS = float(os.environ.get("AUTH_TOKEN_DAYS", "30"))
+AUTH_CONFIGURED = (
+    len(ADMIN_PASSWORD) >= 8
+    and len(AUTH_SECRET) >= 32
+    # refuse the unedited placeholders from .env.example (the repo is public)
+    and not ADMIN_PASSWORD.startswith("<")
+    and not AUTH_SECRET.startswith("<")
+)
+if not AUTH_CONFIGURED:
+    log.error(
+        "Auth is not configured: set ADMIN_PASSWORD (8+ chars) and AUTH_SECRET (32+ random chars). "
+        "All protected API routes will return 503 until then."
+    )
+
+_LOGIN_WINDOW_S = 15 * 60
+_LOGIN_MAX_FAILS = 10
+_login_failures: Dict[str, List[float]] = {}
+
+
+def _b64e(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _b64d(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def _signing_key() -> bytes:
+    return hmac.new(AUTH_SECRET.encode(), b"charm-studio:" + ADMIN_PASSWORD.encode(), hashlib.sha256).digest()
+
+
+def make_token(now: Optional[float] = None) -> Dict[str, Any]:
+    now = time.time() if now is None else now
+    exp = int(now + AUTH_TOKEN_DAYS * 86400)
+    payload = _b64e(json.dumps({"sub": "admin", "iat": int(now), "exp": exp}, separators=(",", ":")).encode())
+    sig = _b64e(hmac.new(_signing_key(), payload.encode(), hashlib.sha256).digest())
+    return {"token": f"{payload}.{sig}", "expires_at": datetime.fromtimestamp(exp, timezone.utc).isoformat()}
+
+
+def verify_token(token: str, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    try:
+        payload, sig = token.split(".", 1)
+        expected = _b64e(hmac.new(_signing_key(), payload.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, expected):
+            return None
+        claims = json.loads(_b64d(payload))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if claims.get("sub") != "admin" or claims.get("exp", 0) < (time.time() if now is None else now):
+        return None
+    return claims
+
+
+def client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
+
+
+async def require_auth(request: Request) -> Dict[str, Any]:
+    if not AUTH_CONFIGURED:
+        raise HTTPException(503, "Login is not set up on the server: set ADMIN_PASSWORD and AUTH_SECRET.")
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    claims = verify_token(token.strip()) if scheme.lower() == "bearer" and token else None
+    if not claims:
+        raise HTTPException(401, "Please log in again.", headers={"WWW-Authenticate": "Bearer"})
+    return claims
+
+
+# Routers: `public` needs no login, `api` requires a valid token on every route.
+public = APIRouter(prefix="/api")
+api = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
+
+
+class LoginIn(BaseModel):
+    password: str
+
+
+@public.post("/auth/login")
+async def login(payload: LoginIn, request: Request):
+    if not AUTH_CONFIGURED:
+        raise HTTPException(503, "Login is not set up on the server: set ADMIN_PASSWORD and AUTH_SECRET.")
+    ip, now = client_ip(request), time.time()
+    recent = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW_S]
+    if len(recent) >= _LOGIN_MAX_FAILS:
+        raise HTTPException(429, "Too many wrong passwords. Try again in 15 minutes.")
+    if not hmac.compare_digest(payload.password.encode(), ADMIN_PASSWORD.encode()):
+        recent.append(now)
+        _login_failures[ip] = recent
+        log.warning("Failed login from %s (%d in window)", ip, len(recent))
+        raise HTTPException(401, "Wrong password.")
+    _login_failures.pop(ip, None)
+    return make_token(now)
+
+
+@api.get("/auth/me")
+async def auth_me(claims: Dict[str, Any] = Depends(require_auth)):
+    return {"user": claims["sub"], "expires_at": datetime.fromtimestamp(claims["exp"], timezone.utc).isoformat()}
 
 
 # ---------------------------------------------------------------------------
@@ -205,12 +320,12 @@ async def load_all_orders() -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------
-@api.get("/")
+@public.get("/")
 async def root():
     return {"app": "Charm.Studio", "ok": True}
 
 
-@api.get("/health")
+@public.get("/health")
 async def health():
     await db().fetchval("SELECT 1")
     return {"ok": True}
@@ -877,7 +992,7 @@ def all_verify_tokens() -> set:
     return tokens
 
 
-@api.get("/wa/webhook")
+@public.get("/wa/webhook")
 async def wa_verify(request: Request):
     qp = request.query_params
     if qp.get("hub.mode") == "subscribe" and qp.get("hub.verify_token") in all_verify_tokens():
@@ -885,7 +1000,7 @@ async def wa_verify(request: Request):
     return PlainTextResponse("Forbidden", status_code=403)
 
 
-@api.post("/wa/webhook")
+@public.post("/wa/webhook")
 async def wa_webhook(request: Request, background: BackgroundTasks):
     try:
         body = await request.json()
@@ -965,6 +1080,7 @@ async def wa_test_send(payload: TestSendIn):
 
 
 # ---------------------------------------------------------------------------
+app.include_router(public)
 app.include_router(api)
 app.add_middleware(
     CORSMiddleware,

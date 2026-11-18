@@ -41,15 +41,16 @@ The backend is a single stateless process. All durable state lives in Postgres, 
 1. **Setup**: loads `.env`, reads config, defines `SCHEMA_SQL` from `schema.sql`.
 2. **WhatsApp number config**: `load_wa_numbers()` builds `phone_number_id → {logical_id, token, display, verify}` from `WA_NUMBERS` and `WA_<ID>_*` env vars.
 3. **App and lifespan**: creates the asyncpg pool and runs `schema.sql` on startup (idempotent `CREATE ... IF NOT EXISTS`), and closes the pool on shutdown.
-4. **Models**: Pydantic request bodies (`OrderIn`, `OrderPatch`, `BulkOrders`, `ExtractIn`, `TestSendIn`).
-5. **Orders and stats**: CRUD, search, bulk insert, CSV export, stats.
-6. **AI helpers**: `get_ai()` (provider-aware client), `claude_text()`, JSON parsing, chunking and dedupe.
-7. **AI extraction endpoints**: `/api/extract`, `/api/extract/bulk-file`.
-8. **PDF Label Studio**: ID detection, matching, sticker drawing, `/api/pdf/analyze`, `/api/pdf/annotate`.
-9. **WhatsApp bot**: conversation state machine, webhook endpoints, status, test send.
-10. **Middleware**: CORS, including the exposed `X-Matched-Pages`, `X-Not-Found-Pages` and `Content-Disposition` headers.
+4. **Authentication**: password login, signed tokens, and the `require_auth` dependency (see [Authentication](#authentication) below).
+5. **Models**: Pydantic request bodies (`OrderIn`, `OrderPatch`, `BulkOrders`, `ExtractIn`, `TestSendIn`).
+6. **Orders and stats**: CRUD, search, bulk insert, CSV export, stats.
+7. **AI helpers**: `get_ai()` (provider-aware client), `claude_text()`, JSON parsing, chunking and dedupe.
+8. **AI extraction endpoints**: `/api/extract`, `/api/extract/bulk-file`.
+9. **PDF Label Studio**: ID detection, matching, sticker drawing, `/api/pdf/analyze`, `/api/pdf/annotate`.
+10. **WhatsApp bot**: conversation state machine, webhook endpoints, status, test send.
+11. **Middleware**: CORS, including the exposed `X-Matched-Pages`, `X-Not-Found-Pages` and `Content-Disposition` headers.
 
-Every route sits under the `/api` prefix (`APIRouter(prefix="/api")`).
+Every route sits under the `/api` prefix. There are two routers: `public` (no login: `/`, `/health`, `/auth/login`, and the WhatsApp webhook `GET`/`POST /wa/webhook`) and `api`, which carries `dependencies=[Depends(require_auth)]` so every route on it needs a valid token.
 
 ### Database access
 
@@ -57,6 +58,30 @@ Every route sits under the `/api` prefix (`APIRouter(prefix="/api")`).
 - A per-connection `init` registers JSON codecs, so `jsonb` columns come back as Python dicts.
 - Rows are turned into plain dicts by `row_dict()`, which also converts `datetime` to an ISO-8601 string. The API never exposes database internals; every record is identified by its own `id` string (a UUID4).
 - SQL is always parameterized (`$1, $2, …`). The only dynamic SQL is the `UPDATE` column list in `PATCH /orders/{id}`, and its column names come from the Pydantic model's fields, never from request data.
+
+### Authentication
+
+The app has one user, the seller, so it uses a single admin password rather than user accounts.
+
+```
+POST /api/auth/login {password}
+   ├─ 10 wrong passwords from one IP within 15 min -> 429 (in-memory counter; resets on restart)
+   ├─ hmac.compare_digest(password, ADMIN_PASSWORD) fails -> 401
+   └─ ok -> {token, expires_at}
+
+token = base64url({"sub":"admin","iat":…,"exp":…}) + "." + base64url(HMAC-SHA256(key, payload))
+key   = HMAC-SHA256(AUTH_SECRET, "charm-studio:" + ADMIN_PASSWORD)
+
+every protected route -> require_auth():
+   auth not configured -> 503 "Login is not set up"
+   missing / bad signature / expired token -> 401
+```
+
+- **Revocation:** the signing key is derived from both `AUTH_SECRET` and `ADMIN_PASSWORD`, so changing either one invalidates every token already issued (logs every device out). There is no per-token revocation list.
+- **Fails closed:** auth counts as configured only when `ADMIN_PASSWORD` is at least 8 characters, `AUTH_SECRET` at least 32, and neither is an unedited `<placeholder>` from `.env.example`. Otherwise every protected route returns 503, so a misconfigured deploy never runs open.
+- **Frontend:** `src/lib/auth.js` stores the token in `localStorage` (falling back to memory if storage is blocked). An axios request interceptor adds `Authorization: Bearer …`. A response interceptor turns any 401 into a logout event, which `App.js` handles by showing the login screen. On load, a saved token is checked with `GET /api/auth/me`.
+- **Downloads:** CSV export and the annotated PDF are fetched through axios as blobs, so they carry the token. A plain `<a href>` link can't send it.
+- **Webhook:** `/api/wa/webhook` has to stay public because Meta calls it. It is protected by the verify token for the handshake, and should also check Meta's signature (see the gaps below).
 
 ### Data model
 
@@ -217,6 +242,7 @@ All configuration comes from environment variables: `backend/.env` locally and t
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude |
 | `OLLAMA_API_KEY`, `OLLAMA_MODEL`, `OLLAMA_BASE_URL` | Ollama Cloud or a self-hosted server |
 | `WA_GRAPH_VERSION`, `WA_VERIFY_TOKEN`, `WA_NUMBERS`, `WA_<ID>_PHONE_ID/TOKEN/DISPLAY/VERIFY` | WhatsApp Cloud API |
+| `ADMIN_PASSWORD`, `AUTH_SECRET`, `AUTH_TOKEN_DAYS` | login password, token-signing secret (32+ chars), token lifetime (default 30 days) |
 | `PUBLIC_BASE_URL` | optional override for the callback URL shown on the Bot page |
 | `REACT_APP_BACKEND_URL` (frontend) | API base URL, baked into the bundle at build time |
 
@@ -237,16 +263,16 @@ GitHub (celedhub-dot/charm-studio, branch main)
 ## Security model and known gaps
 
 What's in place:
+- **Password login** on every API route except health, login and the WhatsApp webhook, with signed, expiring tokens and a lockout after 10 wrong passwords (see [Authentication](#authentication)).
 - Secrets live only in backend env vars; the frontend bundle contains just the API URL. Both `.env` files are git-ignored.
 - RLS blocks Supabase's public REST API from reading the tables.
 - WhatsApp tokens never leave the server. `/api/wa/numbers` masks phone number IDs.
 - SQL is parameterized.
 
-**Gaps to close before relying on this in production:**
+**Gaps still open:**
 
-1. **The API has no authentication.** Anyone who finds the Render URL can list, export, change or delete orders, and can use `/api/wa/test-send` to send messages from the business number. CORS only restricts browsers; it doesn't stop direct requests. Options: a shared API key header checked by middleware, HTTP basic auth, or Supabase Auth with JWT verification.
-2. **Webhook payloads aren't verified.** `POST /api/wa/webhook` doesn't check Meta's `X-Hub-Signature-256` header, so a forged request could create orders. The fix is to verify an HMAC-SHA256 of the raw body using the Meta App Secret.
-3. **Webhook processing isn't durable.** A message ID is recorded in `wa_events` *before* it is handled. If the process dies mid-handling (for example, Render restarts), Meta's retry is treated as a duplicate and that message is dropped. A queue, or marking events done only after handling, would fix it.
+1. **Webhook payloads aren't verified.** `POST /api/wa/webhook` doesn't check Meta's `X-Hub-Signature-256` header, so a forged request could create orders. The fix is to verify an HMAC-SHA256 of the raw body using the Meta App Secret.
+2. **Webhook processing isn't durable.** A message ID is recorded in `wa_events` *before* it is handled. If the process dies mid-handling (for example, Render restarts), Meta's retry is treated as a duplicate and that message is dropped. A queue, or marking events done only after handling, would fix it.
 
 ## Limitations and scaling notes
 

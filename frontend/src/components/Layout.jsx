@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
-import { SquaresFour, Package, ChatsCircle, Tag, Robot, List, X, Sparkle } from "@phosphor-icons/react";
+import { SquaresFour, Package, ChatsCircle, Tag, Robot, List, X, Sparkle, SignOut } from "@phosphor-icons/react";
 import { cn } from "../lib/utils";
 
 export const NAV = [
@@ -53,7 +53,19 @@ function NavItems({ onNavigate }) {
   );
 }
 
-export default function Layout() {
+function LogoutButton({ onLogout, testId }) {
+  return (
+    <button
+      data-testid={testId}
+      onClick={onLogout}
+      className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted transition-all duration-200 hover:bg-sand hover:text-danger"
+    >
+      <SignOut size={19} /> Log out
+    </button>
+  );
+}
+
+export default function Layout({ onLogout }) {
   const [open, setOpen] = useState(false);
   const location = useLocation();
   useEffect(() => setOpen(false), [location.pathname]);
@@ -67,6 +79,9 @@ export default function Layout() {
         </div>
         <div className="mt-8 flex-1">
           <NavItems />
+        </div>
+        <div className="mb-3">
+          <LogoutButton onLogout={onLogout} testId="logout-btn" />
         </div>
         <div className="rounded-xl border border-line bg-white p-3 text-xs text-muted">
           Record customisations, then stamp them onto your Meesho &amp; Flipkart labels.
@@ -103,6 +118,9 @@ export default function Layout() {
               </button>
             </div>
             <NavItems onNavigate={() => setOpen(false)} />
+            <div className="mt-auto border-t border-line pt-3">
+              <LogoutButton onLogout={onLogout} testId="mobile-logout-btn" />
+            </div>
           </div>
         </div>
       )}

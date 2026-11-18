@@ -41,6 +41,10 @@ These came from the original spec. Keep them unless there's a good reason to cha
 - Timestamps are stored in UTC and returned as ISO-8601 strings.
 - A new feature shouldn't need a new service. The backend is deliberately one file (`server.py`) and one process.
 
+**Auth**
+- Every new backend route goes on the `api` router (login required). Only add a route to `public` when an outside service has to call it without logging in, as Meta does with the webhook.
+- Frontend calls must go through the axios client in `src/lib/api.js` so they carry the token. Don't use raw `fetch` or `<a href>` to API URLs.
+
 **Frontend**
 - Design is earthy and organic: primary deep green `#2D4A22`, accent terracotta `#D97757`, warm off-white background `#F7F5F0`, subtle borders, rounded cards, small hover animations.
 - Fonts are Manrope for headings and IBM Plex Sans for body text.
@@ -70,6 +74,7 @@ These came from the original spec. Keep them unless there's a good reason to cha
 | 2026-11-18 | Sticker text is cut with `...`, not `…`. | Base-14 Helvetica in PyMuPDF renders `…` as `·`. |
 | 2026-11-18 | CORS accepts an optional `CORS_ORIGIN_REGEX`. | Vercel preview deployments get a different URL each time. |
 | 2026-11-18 | Bot: a short, digit-free first message just triggers the greeting instead of being saved as an Order ID. | Customers often open with "ok" or "hey". |
+| 2026-11-18 | **API authentication added:** a single admin password (`ADMIN_PASSWORD`) exchanged for an HMAC-signed, 30-day bearer token (`AUTH_SECRET`). Public routes are only health, login and the WhatsApp webhook. It fails closed when not configured. | One seller, so no user accounts needed. A key baked into the frontend would be public on Vercel, so a real login was required. No new dependencies (stdlib `hmac`). |
 
 ## Current status (2026-11-18)
 
@@ -79,6 +84,7 @@ These came from the original spec. Keep them unless there's a good reason to cha
 - Helper functions pass offline checks: ID detection, matching, chunking, dedupe, JSON parsing, bot steps.
 - Both AI providers send correctly shaped requests (tested against a local fake API, with no real AI calls made).
 - The frontend's production build compiles with no warnings.
+- Login works end to end: wrong password, right password, protected routes, tampered and expired tokens, lockout, logout, and a stale saved token.
 - The code is pushed to GitHub (`main`).
 
 **Not yet done or verified:**
@@ -90,11 +96,10 @@ These came from the original spec. Keep them unless there's a good reason to cha
 ## Open items, roughly by priority
 
 1. **Rotate the Supabase database password** (it was exposed in a chat log during setup), then update `backend/.env` and Render.
-2. **Add authentication to the API** before going live. Today anyone with the Render URL can read or delete orders and send WhatsApp messages. See ARCHITECTURE.md → Security model.
-3. **Verify Meta's `X-Hub-Signature-256`** on the webhook (needs the Meta App Secret as a new env var).
-4. Deploy: Render first, then Vercel, then set `CORS_ORIGINS` on Render.
-5. Test with real label PDFs from both marketplaces. Check sticker placement, rotated pages and ID detection.
-6. Housekeeping: prune old `wa_events` rows; consider making webhook handling durable.
+2. **Verify Meta's `X-Hub-Signature-256`** on the webhook (needs the Meta App Secret as a new env var).
+3. Deploy: Render first, then Vercel, then set `CORS_ORIGINS` on Render. Set a strong `ADMIN_PASSWORD` on Render.
+4. Test with real label PDFs from both marketplaces. Check sticker placement, rotated pages and ID detection.
+5. Housekeeping: prune old `wa_events` rows; consider making webhook handling durable.
 
 ## Local development environment (seller's Windows PC)
 

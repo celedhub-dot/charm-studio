@@ -18,6 +18,10 @@ services:
         sync: false # your Vercel URL, e.g. https://charm-studio.vercel.app
       - key: CORS_ORIGIN_REGEX
         sync: false # optional, e.g. https://charm-studio-.*\.vercel\.app for preview deploys
+      - key: ADMIN_PASSWORD
+        sync: false # the password you'll log in with
+      - key: AUTH_SECRET
+        generateValue: true # signs login tokens; regenerate to log out all devices
       - key: AI_PROVIDER
         value: anthropic # or: ollama
       - key: ANTHROPIC_API_KEY

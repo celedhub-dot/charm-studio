@@ -19,7 +19,7 @@ import {
   deleteOrder,
   deleteAllOrders,
   bulkOrders,
-  apiUrl,
+  exportOrdersCsv,
   errorMessage,
 } from "../lib/api";
 import { PageHeader, SourceBadge, EmptyState, EditableRows } from "../components/common";
@@ -55,7 +55,19 @@ export default function Orders() {
   const [editDraft, setEditDraft] = useState(emptyOrder());
   const [importRows, setImportRows] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const fileRef = useRef(null);
+
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      await exportOrdersCsv();
+    } catch (err) {
+      toast.error(errorMessage(err, "Could not export CSV"));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const load = useCallback(async (q) => {
     setLoading(true);
@@ -175,10 +187,8 @@ export default function Orders() {
         subtitle="Every customisation you have recorded, ready to stamp onto labels."
         actions={
           <>
-            <Button variant="outline" asChild data-testid="export-csv-btn">
-              <a href={apiUrl("/orders/export.csv")}>
-                <DownloadSimple size={16} /> Export CSV
-              </a>
+            <Button variant="outline" data-testid="export-csv-btn" onClick={exportCsv} disabled={exporting}>
+              {exporting ? <Spinner /> : <DownloadSimple size={16} />} Export CSV
             </Button>
             <Button variant="outline" data-testid="import-csv-btn" onClick={() => fileRef.current?.click()}>
               <UploadSimple size={16} /> Import CSV

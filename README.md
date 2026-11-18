@@ -54,9 +54,11 @@ cp .env.example .env        # REACT_APP_BACKEND_URL=http://localhost:8001
 npm install && npm start
 ```
 
-Secrets belong only in `backend/.env`. `frontend/.env` holds just `REACT_APP_BACKEND_URL`: anything prefixed `REACT_APP_` is baked into the public JavaScript bundle. Both `.env` files are git-ignored.
+Open http://localhost:3000 and log in with the `ADMIN_PASSWORD` from `backend/.env`.
 
-Open http://localhost:3000.
+**Login:** the app has a single admin password (`ADMIN_PASSWORD`, at least 8 characters). `AUTH_SECRET`, a random string of 32 or more characters, signs login tokens, which last 30 days (`AUTH_TOKEN_DAYS`). Changing either value logs every device out. After 10 wrong passwords from the same IP, login is locked for 15 minutes. If either value is missing, too short or still the `<placeholder>`, the API refuses every protected request with a "Login is not set up" error.
+
+Secrets belong only in `backend/.env`. `frontend/.env` holds just `REACT_APP_BACKEND_URL`: anything prefixed `REACT_APP_` is baked into the public JavaScript bundle. Both `.env` files are git-ignored.
 
 ## 3. Deploy (GitHub, then Render, then Vercel)
 
@@ -65,7 +67,7 @@ Push the repo to GitHub first; both Render and Vercel deploy from it and redeplo
 **Backend on Render**
 
 1. In Render, choose **New → Blueprint**, pick the repo, and Render reads `render.yaml`. It creates `charm-studio-api`, a Python web service (`uvicorn server:app --host 0.0.0.0 --port $PORT`).
-2. Fill in the secrets Render asks for: `DATABASE_URL`, the AI key (`ANTHROPIC_API_KEY`, or `OLLAMA_API_KEY` + `OLLAMA_MODEL` with `AI_PROVIDER=ollama`), and the `WA_MAIN_*` values. Leave `CORS_ORIGINS` for now.
+2. Fill in the secrets Render asks for: `DATABASE_URL`, `ADMIN_PASSWORD` (the password you'll log in with; `AUTH_SECRET` is generated for you), the AI key (`ANTHROPIC_API_KEY`, or `OLLAMA_API_KEY` + `OLLAMA_MODEL` with `AI_PROVIDER=ollama`), and the `WA_MAIN_*` values. Leave `CORS_ORIGINS` for now.
 3. `WA_VERIFY_TOKEN` is generated for you. Copy its value from the service's Environment tab into the Meta console.
 4. Note the API URL, e.g. `https://charm-studio-api.onrender.com`, and check `https://…/api/health` returns `{"ok":true}`.
 
@@ -112,6 +114,10 @@ Bot flow: it asks for Order ID, then name to print, then charm, then notes ("non
 | GET | `/api/wa/status`, `/api/wa/numbers`, `/api/wa/conversations` | bot status |
 | POST | `/api/wa/test-send` | send a test message |
 | GET | `/api/health` | health check (used by Render) |
+| POST | `/api/auth/login` | password -> bearer token |
+| GET | `/api/auth/me` | check the current token |
+
+Every route needs `Authorization: Bearer <token>` except `/api/health`, `/api/auth/login` and the WhatsApp webhook (`GET`/`POST /api/wa/webhook`), which Meta must be able to reach.
 
 ## Notes
 

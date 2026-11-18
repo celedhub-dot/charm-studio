@@ -1,10 +1,26 @@
 import axios from "axios";
+import { getToken, setToken, signalLogout } from "./auth";
 
 const BASE = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "");
 
 export const api = axios.create({ baseURL: `${BASE}/api` });
 
-export const apiUrl = (path) => `${BASE}/api${path}`;
+// Attach the login token to every request.
+api.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+// An expired or invalid token sends the user back to the login screen.
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const isLogin = err?.config?.url?.includes("/auth/login");
+    if (err?.response?.status === 401 && !isLogin) signalLogout();
+    return Promise.reject(err);
+  }
+);
 
 export function errorMessage(err, fallback = "Something went wrong") {
   const detail = err?.response?.data?.detail;
@@ -29,7 +45,19 @@ export function filenameFromDisposition(header, fallback) {
   return m ? m[1] : fallback;
 }
 
+// Auth
+export const login = (password) =>
+  api.post("/auth/login", { password }).then((r) => {
+    setToken(r.data.token);
+    return r.data;
+  });
+export const getMe = () => api.get("/auth/me").then((r) => r.data);
+
 // Orders
+export const exportOrdersCsv = async () => {
+  const res = await api.get("/orders/export.csv", { responseType: "blob" });
+  downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "charm_orders.csv"));
+};
 export const getOrders = (q) => api.get("/orders", { params: q ? { q } : {} }).then((r) => r.data);
 export const createOrder = (data) => api.post("/orders", data).then((r) => r.data);
 export const updateOrder = (id, data) => api.patch(`/orders/${id}`, data).then((r) => r.data);
