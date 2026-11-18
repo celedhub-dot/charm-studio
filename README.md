@@ -2,6 +2,16 @@
 
 Charm.Studio is for a small seller who takes customised-charm orders on WhatsApp and ships them through Meesho or Flipkart. It records each customer's customisation (name on product, charm, notes) and stamps it onto the seller's A4 PDF shipping labels by matching Order IDs.
 
+**Docs:** this README covers setup and deployment. [ARCHITECTURE.md](ARCHITECTURE.md) explains how the system works (components, data model, key flows, security gaps). [CONTEXT.md](CONTEXT.md) gives the project background, glossary, conventions, decision log and open items.
+
+## Features
+
+- **Orders:** add, search, edit and delete orders inline; import and export CSV; delete all (with confirmation).
+- **WhatsApp Extract:** paste chat text, or upload an exported chat `.txt`, and AI turns it into orders you can edit before saving. Large chats are split into chunks and duplicates are merged.
+- **Label Studio:** drop in a label PDF and see each page's detected Order ID and matched order. Fix unmatched pages by hand, then download a copy with a small customisation sticker in a corner of each label, away from the barcode.
+- **WhatsApp Bot:** customers message your business number, and the bot collects Order ID, name, charm and notes, then saves the order. It supports several numbers.
+- **Dashboard:** order counts (total, today, from WhatsApp, by source), recent orders and shortcuts.
+
 - **Backend:** FastAPI, asyncpg (Supabase Postgres), PyMuPDF, Anthropic SDK (Claude `claude-sonnet-5-5` by default, or Ollama), Meta WhatsApp Cloud API
 - **Frontend:** React (CRA), React Router v7, Tailwind CSS, shadcn-style components on Radix, Phosphor Icons, Sonner, axios
 - **Hosting:** Vercel (frontend), Render (API) and Supabase (database). Code lives on GitHub.
@@ -82,7 +92,7 @@ Multiple numbers: set `WA_NUMBERS=main,store2` and add `WA_STORE2_PHONE_ID`, `WA
 
 **Local testing:** Meta needs public HTTPS. Run `ngrok http 8001` and use `https://<ngrok-id>.ngrok-free.app/api/wa/webhook` with the same verify token.
 
-Bot flow: it asks for Order ID, then name to print, then charm, then notes ("none" skips notes). If a message has 6 or more words, Claude extracts every field it can from it and the bot skips the steps already answered. Sending `hi`, `hello`, `start`, `reset` or `restart` starts over. When all four answers are in, the order is saved with `source=whatsapp`.
+Bot flow: it asks for Order ID, then name to print, then charm, then notes ("none" skips notes). If a message has 6 or more words, the AI extracts every field it can from it and the bot skips the steps already answered. Sending `hi`, `hello`, `start`, `reset` or `restart` starts over. When all four answers are in, the order is saved with `source=whatsapp`.
 
 ## API summary
 
