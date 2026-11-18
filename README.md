@@ -11,13 +11,14 @@ Charm.Studio is for a small seller who takes customised-charm orders on WhatsApp
 - **Label Studio:** drop in a label PDF and see each page's detected Order ID and matched order. Fix unmatched pages by hand, then download a copy with a small customisation sticker in a corner of each label, away from the barcode.
 - **WhatsApp Bot:** customers message your business number, and the bot collects Order ID, name, charm and notes, then saves the order. It supports several numbers.
 - **Dashboard:** order counts (total, today, from WhatsApp, by source), recent orders and shortcuts.
+- **Settings:** your account (name, email, password), WhatsApp numbers (add, check, pause, delete; tokens stored encrypted), shop name, the bot's message wording, Label Studio defaults, and security (session length, log out other devices, recent activity, system status).
 
 - **Backend:** FastAPI, asyncpg (Supabase Postgres), PyMuPDF, Anthropic SDK (Claude `claude-sonnet-5-5` by default, or Ollama), Meta WhatsApp Cloud API
 - **Frontend:** React (CRA), React Router v7, Tailwind CSS, shadcn-style components on Radix, Phosphor Icons, Sonner, axios
 - **Hosting:** Vercel (frontend), Render (API) and Supabase (database). Code lives on GitHub.
 
 ```
-backend/   server.py, schema.sql, requirements.txt, .env.example
+backend/   server.py, security.py, schema.sql, requirements.txt, .env.example, tests/
 frontend/  React app (src/lib/api.js is the axios client), vercel.json
 render.yaml  Render Blueprint for the API
 ```
@@ -41,7 +42,7 @@ Backend (Python 3.11+):
 
 ```bash
 cd backend
-cp .env.example .env        # then fill DATABASE_URL, the AI key, WA_* values
+cp .env.example .env        # then fill DATABASE_URL, AUTH_SECRET, ADMIN_PASSWORD, the AI key
 python -m venv .venv && .venv/Scripts/activate   # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt && uvicorn server:app --reload --port 8001
 ```
@@ -54,9 +55,16 @@ cp .env.example .env        # REACT_APP_BACKEND_URL=http://localhost:8001
 npm install && npm start
 ```
 
-Open http://localhost:3000 and log in with the `ADMIN_PASSWORD` from `backend/.env`.
+Open http://localhost:3000.
 
-**Login:** the app has a single admin password (`ADMIN_PASSWORD`, at least 8 characters). `AUTH_SECRET`, a random string of 32 or more characters, signs login tokens, which last 30 days (`AUTH_TOKEN_DAYS`). Changing either value logs every device out. After 10 wrong passwords from the same IP, login is locked for 15 minutes. If either value is missing, too short or still the `<placeholder>`, the API refuses every protected request with a "Login is not set up" error.
+## Logging in and your account
+
+- **First login:** enter the `ADMIN_PASSWORD` from the server's environment. The app then asks for your name, email and a new password, which is stored hashed (scrypt) in the database. After that you always log in with **email + password**, and `ADMIN_PASSWORD` is no longer used (you can delete it).
+- **Change your name, email or password** in **Settings → Account**. Changing your email needs your current password. Changing your password keeps you logged in on this device and logs out every other one.
+- **Forgot password?** on the login screen emails a one-time reset link (valid 30 minutes) through [Resend](https://resend.com). Set `RESEND_API_KEY` and `FRONTEND_URL` on the server to turn it on. With Resend's default test sender (`onboarding@resend.dev`), emails only reach the address you signed up to Resend with, so make that your account email (or verify your own domain in Resend and set `RESEND_FROM`).
+- **Locked out and email reset isn't working?** Set `RESET_PASSWORD` on the server to a temporary password, log in with it (with your account email), choose a new password, then **delete `RESET_PASSWORD`**. While it's set, Settings → Security shows a red warning.
+- **Security:** logins last 30 days by default (1, 7, 30 or 90 days in Settings → Security). "Log out all other devices" and a recent-activity list are there too. After 10 wrong passwords from the same IP, login locks for 15 minutes.
+- `AUTH_SECRET` (32+ random characters) signs logins **and** encrypts saved WhatsApp tokens. Set it once and don't change it; if you do, everyone is logged out and each saved WhatsApp token must be pasted again.
 
 Secrets belong only in `backend/.env`. `frontend/.env` holds just `REACT_APP_BACKEND_URL`: anything prefixed `REACT_APP_` is baked into the public JavaScript bundle. Both `.env` files are git-ignored.
 
@@ -76,7 +84,7 @@ Push the repo to GitHub first; both Render and Vercel deploy from it and redeplo
    - Instance Type: **Free**
    - Health Check Path: `/api/health`
    - Environment variables: the ones listed in `render.yaml`, plus `PYTHON_VERSION=3.11.9` and an `AUTH_SECRET` you generate yourself (`python -c "import secrets; print(secrets.token_urlsafe(48))"`)
-2. Fill in the secrets Render asks for: `DATABASE_URL`, `ADMIN_PASSWORD` (the password you'll log in with; `AUTH_SECRET` is generated for you), the AI key (`ANTHROPIC_API_KEY`, or `OLLAMA_API_KEY` + `OLLAMA_MODEL` with `AI_PROVIDER=ollama`), and the `WA_MAIN_*` values. Leave `CORS_ORIGINS` for now.
+2. Fill in the secrets Render asks for: `DATABASE_URL`, `ADMIN_PASSWORD` (for your first login; `AUTH_SECRET` is generated for you), the AI key (`ANTHROPIC_API_KEY`, or `OLLAMA_API_KEY` + `OLLAMA_MODEL` with `AI_PROVIDER=ollama`), and optionally `RESEND_API_KEY`. Leave `CORS_ORIGINS` and `FRONTEND_URL` for now.
 3. `WA_VERIFY_TOKEN` is generated for you. Copy its value from the service's Environment tab into the Meta console.
 4. Note the API URL, e.g. `https://charm-studio-api.onrender.com`, and check `https://…/api/health` returns `{"ok":true}`.
 
@@ -86,20 +94,22 @@ Push the repo to GitHub first; both Render and Vercel deploy from it and redeplo
 2. Add the environment variable `REACT_APP_BACKEND_URL` = your Render API URL (no trailing slash), then deploy. CRA bakes it in at build time, so redeploy after changing it.
 3. Note the Vercel URL, e.g. `https://charm-studio.vercel.app`.
 
-**Connect them:** in Render, set `CORS_ORIGINS` to the Vercel URL. To also allow Vercel preview deployments, set `CORS_ORIGIN_REGEX`, e.g. `https://charm-studio-.*\.vercel\.app`. Render redeploys automatically after you save environment changes.
+**Connect them:** in Render, set `CORS_ORIGINS` and `FRONTEND_URL` to the Vercel URL. To also allow Vercel preview deployments, set `CORS_ORIGIN_REGEX`, e.g. `https://charm-studio-.*\.vercel\.app`. Render redeploys automatically after you save environment changes.
 
 **Free-plan note:** Render free web services sleep after about 15 minutes idle. The first WhatsApp message after a sleep can take around 30–60 s while the service wakes up. Meta retries webhooks and replies are deduplicated, so nothing is lost, but customers may see a delayed first reply. A paid instance avoids this.
 
 ## 4. WhatsApp bot (Meta Cloud API)
 
 1. developers.facebook.com → create a **Business** app → add **WhatsApp**.
-2. Copy the **Phone Number ID** and a permanent **access token** into `WA_MAIN_PHONE_ID` / `WA_MAIN_TOKEN`.
+2. Copy the **Phone Number ID** and a permanent **access token** (System User in Business Settings), then add them in the app: **Settings → WhatsApp numbers → Add number**. The app checks them with Meta and stores the token encrypted.
 3. WhatsApp → Configuration → Webhook:
    - Callback URL: `https://<your-api>.onrender.com/api/wa/webhook` (the WhatsApp Bot page shows it with a copy button)
    - Verify token: the same value as `WA_VERIFY_TOKEN`
 4. Subscribe to the **messages** webhook field.
 
-Multiple numbers: set `WA_NUMBERS=main,store2` and add `WA_STORE2_PHONE_ID`, `WA_STORE2_TOKEN`, `WA_STORE2_DISPLAY` (and optionally `WA_STORE2_VERIFY`). Incoming messages are routed by `phone_number_id`.
+Multiple numbers: add each one in Settings. Incoming messages are routed by `phone_number_id`; **Pause** makes the bot ignore a number without deleting it. Numbers set the old way (`WA_NUMBERS` + `WA_<ID>_*` env vars) are imported into Settings once, on the first start of this version.
+
+The bot's wording (greeting, each question, thank-you message with `{shop_name}`, `{order_id}`, `{name}`, `{charm}`, `{notes}`) is edited in **Settings → Shop & bot**.
 
 **Local testing:** Meta needs public HTTPS. Run `ngrok http 8001` and use `https://<ngrok-id>.ngrok-free.app/api/wa/webhook` with the same verify token.
 
@@ -123,10 +133,30 @@ Bot flow: it asks for Order ID, then name to print, then charm, then notes ("non
 | GET | `/api/wa/status`, `/api/wa/numbers`, `/api/wa/conversations` | bot status |
 | POST | `/api/wa/test-send` | send a test message |
 | GET | `/api/health` | health check (used by Render) |
-| POST | `/api/auth/login` | password -> bearer token |
-| GET | `/api/auth/me` | check the current token |
+| GET | `/api/auth/config` | what the login screen should show (public) |
+| POST | `/api/auth/login` | email + password -> bearer token (public) |
+| POST | `/api/auth/forgot`, `/api/auth/reset` | email a reset link / set a new password with it (public) |
+| GET | `/api/auth/me` | current account and token scope |
+| POST | `/api/account/setup` | first-login setup (name, email, password) |
+| POST | `/api/account/password` | change password (returns a fresh token) |
+| GET/PUT | `/api/account`, `/api/account/profile`, `/api/account/session` | profile, email, login length |
+| POST/GET | `/api/account/logout-others`, `/api/account/logins` | log out other devices / recent activity |
+| GET/POST | `/api/wa/numbers` | list / add WhatsApp numbers |
+| PATCH/DELETE | `/api/wa/numbers/{id}` | edit, pause/resume, replace token / delete |
+| POST | `/api/wa/numbers/{id}/check` | check a number with Meta |
+| GET/PUT | `/api/settings`, `/api/settings/{shop,bot,labels}` | app settings |
+| GET | `/api/system/status` | email, AI, WhatsApp setup status |
 
-Every route needs `Authorization: Bearer <token>` except `/api/health`, `/api/auth/login` and the WhatsApp webhook (`GET`/`POST /api/wa/webhook`), which Meta must be able to reach.
+Every route needs `Authorization: Bearer <token>` except `/api/health`, `/api/auth/config`, `/api/auth/login`, `/api/auth/forgot`, `/api/auth/reset` and the WhatsApp webhook (`GET`/`POST /api/wa/webhook`), which Meta must be able to reach. Tokens from the first login or from `RESET_PASSWORD` only allow finishing setup or choosing a new password.
+
+## Tests
+
+`backend/tests/test_account_and_settings.py` runs the real app against a throwaway `charm_test` schema in the database from `backend/.env` (your real tables aren't touched), with Meta and Resend faked:
+
+```bash
+cd backend
+.venv/Scripts/python.exe tests/test_account_and_settings.py
+```
 
 ## Notes
 

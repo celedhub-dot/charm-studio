@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router";
 import { toast } from "sonner";
 import {
   Copy,
@@ -35,13 +36,15 @@ const SETUP = [
     body: <>On the app dashboard, find WhatsApp and click Set up. Meta gives you a test number, or you can add your own business number.</>,
   },
   {
-    title: "Copy the Phone Number ID and access token",
+    title: "Add your number in Settings",
     body: (
       <>
-        Under WhatsApp, then API Setup, copy the <b>Phone Number ID</b> and create a permanent token (System User in Business
-        Settings). Put them in the backend environment as <span className="font-mono text-ink">WA_MAIN_PHONE_ID</span> and{" "}
-        <span className="font-mono text-ink">WA_MAIN_TOKEN</span>, then restart the server. For more numbers, add ids to{" "}
-        <span className="font-mono text-ink">WA_NUMBERS</span> (e.g. main,store2) with matching WA_STORE2_* variables.
+        Under WhatsApp, then API Setup, copy the <b>Phone Number ID</b> and create a permanent access token (a System User in Business Settings).
+        Then open{" "}
+        <Link to="/settings?tab=whatsapp" className="font-medium text-forest hover:underline">
+          Settings, then WhatsApp numbers
+        </Link>{" "}
+        and click Add number. The app checks the details with Meta and stores the token encrypted. You can add as many numbers as you like.
       </>
     ),
   },
@@ -200,7 +203,16 @@ export default function WhatsAppBot() {
             </CardHeader>
             <CardContent>
               {numbers.length === 0 ? (
-                <EmptyState icon={PhoneCall} title="No numbers configured" text="Set WA_NUMBERS and the WA_<ID>_PHONE_ID / WA_<ID>_TOKEN variables on the backend." />
+                <EmptyState
+                  icon={PhoneCall}
+                  title="No active numbers"
+                  text="Add your WhatsApp Business number in Settings so the bot can reply to customers."
+                  action={
+                    <Button asChild variant="outline" size="sm" data-testid="bot-manage-numbers-btn">
+                      <Link to="/settings?tab=whatsapp">Manage numbers</Link>
+                    </Button>
+                  }
+                />
               ) : (
                 <div className="grid gap-3 sm:grid-cols-2">
                   {numbers.map((n) => (

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
-import { SquaresFour, Package, ChatsCircle, Tag, Robot, List, X, Sparkle, SignOut } from "@phosphor-icons/react";
+import { SquaresFour, Package, ChatsCircle, Tag, Robot, List, X, Sparkle, SignOut, GearSix } from "@phosphor-icons/react";
 import { cn } from "../lib/utils";
+import { useSession } from "../lib/session";
 
 export const NAV = [
   { to: "/", label: "Dashboard", icon: SquaresFour, id: "dashboard" },
@@ -10,64 +11,103 @@ export const NAV = [
   { to: "/labels", label: "Label Studio", icon: Tag, id: "labels" },
   { to: "/bot", label: "WhatsApp Bot", icon: Robot, id: "bot" },
 ];
+const SETTINGS_NAV = { to: "/settings", label: "Settings", icon: GearSix, id: "settings" };
 
-function Logo() {
+function Logo({ shopName }) {
   return (
     <div className="flex items-center gap-2.5">
-      <div className="grid h-9 w-9 place-items-center rounded-xl bg-forest text-white">
+      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-forest text-white">
         <Sparkle size={18} weight="fill" />
       </div>
-      <span className="font-heading text-lg font-extrabold tracking-tight text-ink">
-        Charm<span className="text-terracotta">.</span>Studio
-      </span>
+      <div className="min-w-0 leading-tight">
+        <div className="font-heading text-lg font-extrabold tracking-tight text-ink">
+          Charm<span className="text-terracotta">.</span>Studio
+        </div>
+        {shopName && (
+          <div className="truncate text-xs text-muted" data-testid="sidebar-shop-name">
+            {shopName}
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+function NavItem({ to, label, icon: Icon, id, onNavigate }) {
+  return (
+    <NavLink
+      to={to}
+      end={to === "/"}
+      onClick={onNavigate}
+      data-testid={`nav-${id}`}
+      className={({ isActive }) =>
+        cn(
+          "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200",
+          isActive ? "bg-forest text-white shadow-card" : "text-muted hover:translate-x-0.5 hover:bg-sand hover:text-ink"
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <Icon size={19} weight={isActive ? "fill" : "regular"} />
+          {label}
+        </>
+      )}
+    </NavLink>
   );
 }
 
 function NavItems({ onNavigate }) {
   return (
     <nav className="flex flex-col gap-1">
-      {NAV.map(({ to, label, icon: Icon, id }) => (
-        <NavLink
-          key={to}
-          to={to}
-          end={to === "/"}
-          onClick={onNavigate}
-          data-testid={`nav-${id}`}
-          className={({ isActive }) =>
-            cn(
-              "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200",
-              isActive ? "bg-forest text-white shadow-card" : "text-muted hover:bg-sand hover:text-ink hover:translate-x-0.5"
-            )
-          }
-        >
-          {({ isActive }) => (
-            <>
-              <Icon size={19} weight={isActive ? "fill" : "regular"} />
-              {label}
-            </>
-          )}
-        </NavLink>
+      {NAV.map((item) => (
+        <NavItem key={item.to} {...item} onNavigate={onNavigate} />
       ))}
     </nav>
   );
 }
 
-function LogoutButton({ onLogout, testId }) {
+function AccountBox({ onNavigate, testPrefix = "" }) {
+  const { me, logout } = useSession();
+  const name = me?.name || "Account";
+  const initials = name
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0].toUpperCase())
+    .join("");
   return (
-    <button
-      data-testid={testId}
-      onClick={onLogout}
-      className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted transition-all duration-200 hover:bg-sand hover:text-danger"
-    >
-      <SignOut size={19} /> Log out
-    </button>
+    <div className="space-y-1">
+      <NavItem {...SETTINGS_NAV} id={`${testPrefix}settings`} onNavigate={onNavigate} />
+      <div className="mt-2 flex items-center gap-3 rounded-xl border border-line bg-white p-2.5">
+        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-terracotta-50 font-heading text-sm font-bold text-terracotta-700">
+          {initials || "?"}
+        </div>
+        <div className="min-w-0 flex-1 leading-tight">
+          <div className="truncate text-sm font-semibold text-ink" data-testid={`${testPrefix}account-name`}>
+            {name}
+          </div>
+          <div className="truncate text-xs text-muted">{me?.email}</div>
+        </div>
+        <button
+          data-testid={`${testPrefix}logout-btn`}
+          onClick={logout}
+          className="rounded-lg p-2 text-muted transition-colors hover:bg-sand hover:text-danger"
+          aria-label="Log out"
+          title="Log out"
+        >
+          <SignOut size={18} />
+        </button>
+      </div>
+    </div>
   );
 }
 
-export default function Layout({ onLogout }) {
+export default function Layout() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
+  const { settings } = useSession();
+  const shopName = settings?.shop?.shop_name || "";
   useEffect(() => setOpen(false), [location.pathname]);
 
   return (
@@ -75,22 +115,17 @@ export default function Layout({ onLogout }) {
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-line bg-[#FBFAF6] px-4 py-6 lg:flex">
         <div className="px-2">
-          <Logo />
+          <Logo shopName={shopName} />
         </div>
         <div className="mt-8 flex-1">
           <NavItems />
         </div>
-        <div className="mb-3">
-          <LogoutButton onLogout={onLogout} testId="logout-btn" />
-        </div>
-        <div className="rounded-xl border border-line bg-white p-3 text-xs text-muted">
-          Record customisations, then stamp them onto your Meesho &amp; Flipkart labels.
-        </div>
+        <AccountBox />
       </aside>
 
       {/* Mobile top bar */}
       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-line bg-cream/90 px-4 py-3 backdrop-blur lg:hidden">
-        <Logo />
+        <Logo shopName={shopName} />
         <button
           data-testid="mobile-menu-btn"
           onClick={() => setOpen(true)}
@@ -107,7 +142,7 @@ export default function Layout({ onLogout }) {
           <div className="absolute inset-0 bg-ink/40" onClick={() => setOpen(false)} data-testid="mobile-menu-overlay" />
           <div className="absolute inset-y-0 left-0 flex w-72 flex-col bg-[#FBFAF6] px-4 py-5 shadow-lift animate-in slide-in-from-left">
             <div className="mb-6 flex items-center justify-between px-2">
-              <Logo />
+              <Logo shopName={shopName} />
               <button
                 data-testid="mobile-menu-close-btn"
                 onClick={() => setOpen(false)}
@@ -119,7 +154,7 @@ export default function Layout({ onLogout }) {
             </div>
             <NavItems onNavigate={() => setOpen(false)} />
             <div className="mt-auto border-t border-line pt-3">
-              <LogoutButton onLogout={onLogout} testId="mobile-logout-btn" />
+              <AccountBox onNavigate={() => setOpen(false)} testPrefix="mobile-" />
             </div>
           </div>
         </div>

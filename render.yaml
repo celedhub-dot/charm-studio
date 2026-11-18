@@ -18,11 +18,15 @@ services:
       - key: CORS_ORIGINS
         sync: false # your Vercel URL, e.g. https://charm-studio.vercel.app
       - key: CORS_ORIGIN_REGEX
-        sync: false # optional, e.g. https://charm-studio-.*\.vercel\.app for preview deploys
-      - key: ADMIN_PASSWORD
-        sync: false # the password you'll log in with
+        sync: false # optional, e.g. https://charm-studio-[a-z0-9]+-yourteam\.vercel\.app for preview deploys
       - key: AUTH_SECRET
-        generateValue: true # signs login tokens; regenerate to log out all devices
+        generateValue: true # signs logins and encrypts saved WhatsApp tokens; don't change once numbers are saved
+      - key: ADMIN_PASSWORD
+        sync: false # first login only; afterwards you use the email + password set in the app
+      - key: RESEND_API_KEY
+        sync: false # optional: turns on "Forgot password?" emails (resend.com)
+      - key: FRONTEND_URL
+        sync: false # your Vercel URL; reset links point here
       - key: AI_PROVIDER
         value: anthropic # or: ollama
       - key: ANTHROPIC_API_KEY
@@ -35,11 +39,5 @@ services:
         value: v20.0
       - key: WA_VERIFY_TOKEN
         generateValue: true
-      - key: WA_NUMBERS
-        value: main
-      - key: WA_MAIN_PHONE_ID
-        sync: false
-      - key: WA_MAIN_TOKEN
-        sync: false
-      - key: WA_MAIN_DISPLAY
-        sync: false
+      # WhatsApp numbers are added in the app (Settings -> WhatsApp numbers).
+      # Emergency login: add RESET_PASSWORD by hand only when locked out, then remove it.

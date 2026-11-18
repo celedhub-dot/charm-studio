@@ -8,6 +8,7 @@ import base64
 import csv
 import hashlib
 import hmac
+import html
 import io
 import json
 import logging
@@ -18,7 +19,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import asyncpg
 import pymupdf as fitz
@@ -37,8 +38,19 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import PlainTextResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
+
+from security import (
+    SecretBox,
+    hash_password,
+    new_reset_token,
+    password_problem,
+    read_token,
+    sha256_hex,
+    sign_token,
+    verify_password,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -82,33 +94,170 @@ def db() -> asyncpg.Pool:
 
 
 # ---------------------------------------------------------------------------
-# WhatsApp number config (multi-number)
+# Configuration from the environment
 # ---------------------------------------------------------------------------
 WA_GRAPH_VERSION = os.environ.get("WA_GRAPH_VERSION", "v20.0")
 WA_VERIFY_TOKEN = os.environ.get("WA_VERIFY_TOKEN", "").strip()
 
 
-def load_wa_numbers() -> Dict[str, Dict[str, str]]:
-    """Return a map phone_number_id -> config for each logical id in WA_NUMBERS."""
-    numbers: Dict[str, Dict[str, str]] = {}
+def _env_secret(name: str, min_len: int) -> str:
+    """Read a secret env var, ignoring unset, too-short or unedited "<placeholder>" values."""
+    value = os.environ.get(name, "")
+    return value if len(value) >= min_len and not value.startswith("<") else ""
+
+
+AUTH_SECRET = _env_secret("AUTH_SECRET", 32)
+LEGACY_ADMIN_PASSWORD = _env_secret("ADMIN_PASSWORD", 8)  # only used for the very first login
+RESET_PASSWORD = _env_secret("RESET_PASSWORD", 8)  # emergency way back in; remove after use
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+RESEND_FROM = os.environ.get("RESEND_FROM", "").strip() or "Charm.Studio <onboarding@resend.dev>"
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
+CORS_ORIGINS = [
+    o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()
+]
+# Optional, e.g. https://charm-studio-[a-z0-9]+-you\.vercel\.app to also allow Vercel preview deployments
+CORS_ORIGIN_REGEX = os.environ.get("CORS_ORIGIN_REGEX", "").strip() or None
+
+if not AUTH_SECRET:
+    log.error("AUTH_SECRET is missing or shorter than 32 characters: login and saved WhatsApp tokens won't work.")
+
+# Encrypts secrets stored in the database (WhatsApp tokens). Derived from AUTH_SECRET.
+secret_box = SecretBox(AUTH_SECRET or "auth-secret-not-set", "charm-studio:secrets")
+
+
+def env_wa_numbers() -> List[Dict[str, str]]:
+    """Numbers configured the old way (WA_NUMBERS + WA_<ID>_*). Imported into the database once."""
+    found = []
     for logical_id in [x.strip() for x in os.environ.get("WA_NUMBERS", "").split(",") if x.strip()]:
         key = logical_id.upper()
         phone_id = os.environ.get(f"WA_{key}_PHONE_ID", "").strip()
         token = os.environ.get(f"WA_{key}_TOKEN", "").strip()
-        if not phone_id or not token:
-            log.warning("WhatsApp number '%s' skipped: missing PHONE_ID or TOKEN", logical_id)
-            continue
-        numbers[phone_id] = {
-            "logical_id": logical_id,
-            "phone_id": phone_id,
+        if phone_id and token and not phone_id.startswith("<") and not token.startswith("<"):
+            found.append(
+                {
+                    "label": logical_id,
+                    "phone_id": phone_id,
+                    "token": token,
+                    "display": os.environ.get(f"WA_{key}_DISPLAY", "").strip(),
+                    "verify": os.environ.get(f"WA_{key}_VERIFY", "").strip(),
+                }
+            )
+    return found
+
+
+# ---------------------------------------------------------------------------
+# In-memory caches (single process): account, settings, WhatsApp numbers.
+# Reloaded from the database at startup and after every change.
+# ---------------------------------------------------------------------------
+ACCOUNT: Dict[str, Any] = {}
+SETTINGS: Dict[str, Dict[str, Any]] = {}
+WA_ALL: List[Dict[str, Any]] = []  # every saved number; "token" is None if it can't be decrypted
+WA_NUMBERS: Dict[str, Dict[str, Any]] = {}  # phone_id -> config, only active numbers with a readable token
+
+DEFAULT_SETTINGS: Dict[str, Dict[str, Any]] = {
+    "shop": {"shop_name": ""},
+    "bot": {
+        "ask_order_id": "Hi! Please send your Order ID.",
+        "ask_product_name": "What name should we print on the product?",
+        "ask_charm": "Which charm would you like?",
+        "ask_notes": "Any notes? Reply 'none' to skip.",
+        "thank_you": (
+            "Thank you! Your order details are saved.\n\n"
+            "Order ID: {order_id}\nName: {name}\nCharm: {charm}\nNotes: {notes}"
+        ),
+    },
+    "labels": {"position": "bottom-right", "font_size": 8, "skip_unmatched": False},
+}
+
+
+async def load_account() -> None:
+    row = await db().fetchrow("SELECT * FROM account WHERE id = 1")
+    ACCOUNT.clear()
+    ACCOUNT.update(dict(row))
+
+
+async def update_account(**fields: Any) -> None:
+    cols = list(fields)  # column names come from our own code, never from requests
+    sets = ", ".join(f"{c} = ${i + 1}" for i, c in enumerate(cols))
+    row = await db().fetchrow(
+        f"UPDATE account SET {sets}, updated_at = now() WHERE id = 1 RETURNING *", *[fields[c] for c in cols]
+    )
+    ACCOUNT.clear()
+    ACCOUNT.update(dict(row))
+
+
+async def load_settings() -> None:
+    rows = await db().fetch("SELECT key, value FROM app_settings")
+    stored = {r["key"]: r["value"] for r in rows}
+    SETTINGS.clear()
+    for section, defaults in DEFAULT_SETTINGS.items():
+        saved = stored.get(section) if isinstance(stored.get(section), dict) else {}
+        SETTINGS[section] = {**defaults, **{k: v for k, v in saved.items() if k in defaults}}
+
+
+async def save_setting(key: str, value: Dict[str, Any]) -> None:
+    await db().execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, now()) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+        key,
+        value,
+    )
+
+
+def _decrypt_or_none(value: str) -> Optional[str]:
+    try:
+        return secret_box.decrypt(value)
+    except ValueError:
+        return None
+
+
+async def load_wa_numbers() -> None:
+    rows = await db().fetch("SELECT * FROM wa_numbers ORDER BY created_at")
+    WA_ALL.clear()
+    WA_NUMBERS.clear()
+    for r in rows:
+        token = _decrypt_or_none(r["token_enc"])
+        verify = (_decrypt_or_none(r["verify_token_enc"]) or "") if r["verify_token_enc"] else ""
+        cfg = {
+            "id": r["id"],
+            "label": r["label"],
+            "logical_id": r["label"],  # used as conversation key and order "channel"
+            "phone_id": r["phone_id"],
+            "display": r["display"],
             "token": token,
-            "display": os.environ.get(f"WA_{key}_DISPLAY", "").strip(),
-            "verify": os.environ.get(f"WA_{key}_VERIFY", "").strip(),
+            "token_last4": r["token_last4"],
+            "verify": verify,
+            "active": r["active"],
+            "created_at": iso(r["created_at"]),
         }
-    return numbers
+        WA_ALL.append(cfg)
+        if r["active"] and token:
+            WA_NUMBERS[r["phone_id"]] = cfg
+    if any(c["token"] is None for c in WA_ALL):
+        log.warning("Some saved WhatsApp tokens can't be decrypted (was AUTH_SECRET changed?). Re-enter them in Settings.")
 
 
-WA_NUMBERS = load_wa_numbers()
+async def import_env_wa_numbers() -> None:
+    """Copy numbers from the old WA_* env vars into the database, once."""
+    if await db().fetchval("SELECT 1 FROM app_settings WHERE key = 'wa_env_imported'"):
+        return
+    imported = 0
+    for n in env_wa_numbers():
+        res = await db().execute(
+            "INSERT INTO wa_numbers (id, label, display, phone_id, token_enc, token_last4, verify_token_enc) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+            str(uuid.uuid4()),
+            n["label"],
+            n["display"],
+            n["phone_id"],
+            secret_box.encrypt(n["token"]),
+            n["token"][-4:],
+            secret_box.encrypt(n["verify"]) if n["verify"] else "",
+        )
+        imported += res.endswith(" 1")
+    await save_setting("wa_env_imported", {"at": now_utc().isoformat(), "count": imported})
+    if imported:
+        log.info("Imported %d WhatsApp number(s) from environment variables into Settings.", imported)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +266,15 @@ WA_NUMBERS = load_wa_numbers()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global pool
+    # Optional DB_SCHEMA puts all tables in a separate Postgres schema, e.g. a throwaway
+    # "charm_test" schema for local testing against the same database as production.
+    schema = os.environ.get("DB_SCHEMA", "").strip()
+    if schema and not re.fullmatch(r"[a-z_][a-z0-9_]{0,40}", schema):
+        raise RuntimeError("DB_SCHEMA must be lowercase letters, digits or underscores.")
+    if schema:
+        conn = await asyncpg.connect(DATABASE_URL, statement_cache_size=0)
+        await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        await conn.close()
     # statement_cache_size=0 keeps asyncpg compatible with Supabase's transaction pooler (pgbouncer).
     pool = await asyncpg.create_pool(
         DATABASE_URL,
@@ -125,10 +283,25 @@ async def lifespan(_: FastAPI):
         statement_cache_size=0,
         init=_init_conn,
         command_timeout=60,
+        server_settings={"search_path": schema} if schema else None,
     )
     async with pool.acquire() as conn:
+        if schema:
+            assert await conn.fetchval("SELECT current_schema()") == schema, "search_path not applied"
         await conn.execute(SCHEMA_SQL)
-    log.info("Charm.Studio ready. WhatsApp numbers configured: %d", len(WA_NUMBERS))
+    await load_account()
+    await load_settings()
+    if AUTH_SECRET:
+        await import_env_wa_numbers()
+    await load_wa_numbers()
+    log.info(
+        "Charm.Studio ready. Account set up: %s. WhatsApp numbers: %d saved, %d active.",
+        not needs_setup(),
+        len(WA_ALL),
+        len(WA_NUMBERS),
+    )
+    if RESET_PASSWORD:
+        log.warning("RESET_PASSWORD is set. Log in with it, choose a new password, then remove it from the environment.")
     yield
     await pool.close()
 
@@ -139,66 +312,48 @@ app = FastAPI(title="Charm.Studio API", lifespan=lifespan)
 # ---------------------------------------------------------------------------
 # Authentication
 #
-# Single-seller app: one admin password (ADMIN_PASSWORD). POST /api/auth/login
-# exchanges it for a signed, expiring bearer token; every other /api route needs
-# "Authorization: Bearer <token>" except the public ones (health, WhatsApp webhook).
-#
-# Tokens are HMAC-SHA256 signed with a key derived from AUTH_SECRET *and*
-# ADMIN_PASSWORD, so changing either one logs every device out.
+# One owner account (table `account`). Login with email + password returns a
+# signed bearer token. Its "scope" is:
+#   full     - normal access
+#   setup    - first login (via ADMIN_PASSWORD): may only finish account setup
+#   password - logged in via RESET_PASSWORD: may only choose a new password
+# The signing key mixes AUTH_SECRET, the password hash and a token_version, so
+# changing the password or pressing "log out all other devices" invalidates
+# every token issued before.
 # ---------------------------------------------------------------------------
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-AUTH_SECRET = os.environ.get("AUTH_SECRET", "")
-AUTH_TOKEN_DAYS = float(os.environ.get("AUTH_TOKEN_DAYS", "30"))
-AUTH_CONFIGURED = (
-    len(ADMIN_PASSWORD) >= 8
-    and len(AUTH_SECRET) >= 32
-    # refuse the unedited placeholders from .env.example (the repo is public)
-    and not ADMIN_PASSWORD.startswith("<")
-    and not AUTH_SECRET.startswith("<")
-)
-if not AUTH_CONFIGURED:
-    log.error(
-        "Auth is not configured: set ADMIN_PASSWORD (8+ chars) and AUTH_SECRET (32+ random chars). "
-        "All protected API routes will return 503 until then."
-    )
-
+SCOPED_TOKEN_SECONDS = 3600
 _LOGIN_WINDOW_S = 15 * 60
 _LOGIN_MAX_FAILS = 10
+_FORGOT_MAX = 5
 _login_failures: Dict[str, List[float]] = {}
+_forgot_requests: Dict[str, List[float]] = {}
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def _b64e(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+def needs_setup() -> bool:
+    return not ACCOUNT.get("password_hash")
 
 
-def _b64d(text: str) -> bytes:
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+def auth_problem() -> Optional[str]:
+    if not AUTH_SECRET:
+        return "Login is not set up on the server: set AUTH_SECRET (32+ random characters)."
+    if needs_setup() and not (LEGACY_ADMIN_PASSWORD or RESET_PASSWORD):
+        return "Login is not set up on the server: set ADMIN_PASSWORD (8+ characters) for the first login."
+    return None
 
 
-def _signing_key() -> bytes:
-    return hmac.new(AUTH_SECRET.encode(), b"charm-studio:" + ADMIN_PASSWORD.encode(), hashlib.sha256).digest()
+def signing_key() -> bytes:
+    basis = ACCOUNT.get("password_hash") or ("legacy:" + LEGACY_ADMIN_PASSWORD)
+    material = f"charm-studio:v2:{basis}:{ACCOUNT.get('token_version', 1)}"
+    return hmac.new(AUTH_SECRET.encode(), material.encode(), hashlib.sha256).digest()
 
 
-def make_token(now: Optional[float] = None) -> Dict[str, Any]:
+def make_token(scope: str = "full", now: Optional[float] = None) -> Dict[str, Any]:
     now = time.time() if now is None else now
-    exp = int(now + AUTH_TOKEN_DAYS * 86400)
-    payload = _b64e(json.dumps({"sub": "admin", "iat": int(now), "exp": exp}, separators=(",", ":")).encode())
-    sig = _b64e(hmac.new(_signing_key(), payload.encode(), hashlib.sha256).digest())
-    return {"token": f"{payload}.{sig}", "expires_at": datetime.fromtimestamp(exp, timezone.utc).isoformat()}
-
-
-def verify_token(token: str, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    try:
-        payload, sig = token.split(".", 1)
-        expected = _b64e(hmac.new(_signing_key(), payload.encode(), hashlib.sha256).digest())
-        if not hmac.compare_digest(sig, expected):
-            return None
-        claims = json.loads(_b64d(payload))
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if claims.get("sub") != "admin" or claims.get("exp", 0) < (time.time() if now is None else now):
-        return None
-    return claims
+    life = int(ACCOUNT.get("session_days") or 30) * 86400 if scope == "full" else SCOPED_TOKEN_SECONDS
+    exp = int(now + life)
+    token = sign_token(signing_key(), {"sub": "owner", "scope": scope, "iat": int(now), "exp": exp})
+    return {"token": token, "scope": scope, "expires_at": datetime.fromtimestamp(exp, timezone.utc).isoformat()}
 
 
 def client_ip(request: Request) -> str:
@@ -206,46 +361,333 @@ def client_ip(request: Request) -> str:
     return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
 
 
-async def require_auth(request: Request) -> Dict[str, Any]:
-    if not AUTH_CONFIGURED:
-        raise HTTPException(503, "Login is not set up on the server: set ADMIN_PASSWORD and AUTH_SECRET.")
-    header = request.headers.get("authorization", "")
-    scheme, _, token = header.partition(" ")
-    claims = verify_token(token.strip()) if scheme.lower() == "bearer" and token else None
-    if not claims:
+def _recent(store: Dict[str, List[float]], key: str, window: float) -> List[float]:
+    now = time.time()
+    hits = [t for t in store.get(key, []) if now - t < window]
+    store[key] = hits
+    return hits
+
+
+async def require_session(request: Request) -> Dict[str, Any]:
+    """Any valid token, whatever its scope."""
+    problem = auth_problem()
+    if problem:
+        raise HTTPException(503, problem)
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    claims = read_token(signing_key(), token.strip()) if scheme.lower() == "bearer" and token else None
+    if not claims or claims.get("sub") != "owner":
         raise HTTPException(401, "Please log in again.", headers={"WWW-Authenticate": "Bearer"})
     return claims
 
 
-# Routers: `public` needs no login, `api` requires a valid token on every route.
+async def require_full(claims: Dict[str, Any] = Depends(require_session)) -> Dict[str, Any]:
+    if claims.get("scope") != "full":
+        raise HTTPException(403, "Finish setting up your account first.")
+    return claims
+
+
+# Routers: `public` needs no login, `session` accepts any valid token (account
+# setup / forced password change), `api` requires a normal full-access token.
 public = APIRouter(prefix="/api")
-api = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
+session = APIRouter(prefix="/api", dependencies=[Depends(require_session)])
+api = APIRouter(prefix="/api", dependencies=[Depends(require_full)])
+
+
+async def record_login(request: Request, method: str, success: bool) -> None:
+    try:
+        await db().execute(
+            "INSERT INTO login_events (ip, user_agent, method, success) VALUES ($1, $2, $3, $4)",
+            client_ip(request),
+            (request.headers.get("user-agent") or "")[:300],
+            method,
+            success,
+        )
+        await db().execute("DELETE FROM login_events WHERE at < now() - interval '90 days'")
+    except Exception:  # noqa: BLE001
+        log.exception("Could not record login event")
+
+
+def clean_name(name: str) -> str:
+    name = " ".join((name or "").split())
+    if not 1 <= len(name) <= 60:
+        raise HTTPException(400, "Enter your name (up to 60 characters).")
+    return name
+
+
+def clean_email(email: str) -> str:
+    email = (email or "").strip().lower()
+    if len(email) > 254 or not EMAIL_RE.match(email):
+        raise HTTPException(400, "Enter a valid email address.")
+    return email
+
+
+def check_new_password(password: str, email: str) -> None:
+    problem = password_problem(password, email)
+    if problem:
+        raise HTTPException(400, problem)
+
+
+def account_public() -> Dict[str, Any]:
+    return {
+        "name": ACCOUNT.get("name", ""),
+        "email": ACCOUNT.get("email", ""),
+        "session_days": ACCOUNT.get("session_days", 30),
+        "password_changed_at": iso(ACCOUNT.get("password_changed_at")),
+        "created_at": iso(ACCOUNT.get("created_at")),
+    }
 
 
 class LoginIn(BaseModel):
+    email: str = ""
     password: str
+
+
+class SetupIn(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class PasswordIn(BaseModel):
+    current_password: str = ""
+    new_password: str
+
+
+class ProfileIn(BaseModel):
+    name: str
+    email: str
+    current_password: str = ""
+
+
+class SessionLengthIn(BaseModel):
+    session_days: int
+
+
+class ForgotIn(BaseModel):
+    email: str
+
+
+class ResetIn(BaseModel):
+    token: str
+    password: str
+
+
+@public.get("/auth/config")
+async def auth_config():
+    """What the login screen should show (no secrets)."""
+    return {
+        "setup_required": needs_setup(),
+        "password_reset_email": bool(RESEND_API_KEY) and bool(ACCOUNT.get("email")) and not needs_setup(),
+        "problem": auth_problem(),
+    }
 
 
 @public.post("/auth/login")
 async def login(payload: LoginIn, request: Request):
-    if not AUTH_CONFIGURED:
-        raise HTTPException(503, "Login is not set up on the server: set ADMIN_PASSWORD and AUTH_SECRET.")
-    ip, now = client_ip(request), time.time()
-    recent = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW_S]
-    if len(recent) >= _LOGIN_MAX_FAILS:
-        raise HTTPException(429, "Too many wrong passwords. Try again in 15 minutes.")
-    if not hmac.compare_digest(payload.password.encode(), ADMIN_PASSWORD.encode()):
-        recent.append(now)
-        _login_failures[ip] = recent
-        log.warning("Failed login from %s (%d in window)", ip, len(recent))
-        raise HTTPException(401, "Wrong password.")
+    problem = auth_problem()
+    if problem:
+        raise HTTPException(503, problem)
+    ip = client_ip(request)
+    if len(_recent(_login_failures, ip, _LOGIN_WINDOW_S)) >= _LOGIN_MAX_FAILS:
+        raise HTTPException(429, "Too many wrong attempts. Try again in 15 minutes.")
+
+    password = payload.password or ""
+    account_email = (ACCOUNT.get("email") or "").lower()
+    email_ok = not account_email or (payload.email or "").strip().lower() == account_email
+    scope, method = None, "password"
+    if RESET_PASSWORD and email_ok and hmac.compare_digest(password.encode(), RESET_PASSWORD.encode()):
+        scope, method = ("setup" if needs_setup() else "password"), "reset_override"
+    elif needs_setup():
+        if LEGACY_ADMIN_PASSWORD and hmac.compare_digest(password.encode(), LEGACY_ADMIN_PASSWORD.encode()):
+            scope, method = "setup", "first_login"
+    elif email_ok and verify_password(password, ACCOUNT["password_hash"]):
+        scope = "full"
+
+    if not scope:
+        _login_failures.setdefault(ip, []).append(time.time())
+        log.warning("Failed login from %s", ip)
+        await record_login(request, method, False)
+        raise HTTPException(401, "Wrong password." if needs_setup() else "Wrong email or password.")
     _login_failures.pop(ip, None)
-    return make_token(now)
+    await record_login(request, method, True)
+    return make_token(scope)
 
 
-@api.get("/auth/me")
-async def auth_me(claims: Dict[str, Any] = Depends(require_auth)):
-    return {"user": claims["sub"], "expires_at": datetime.fromtimestamp(claims["exp"], timezone.utc).isoformat()}
+@session.get("/auth/me")
+async def auth_me(claims: Dict[str, Any] = Depends(require_session)):
+    return {
+        **account_public(),
+        "scope": claims.get("scope"),
+        "expires_at": datetime.fromtimestamp(claims["exp"], timezone.utc).isoformat(),
+        "reset_override_active": bool(RESET_PASSWORD),
+    }
+
+
+@session.post("/account/setup")
+async def account_setup(payload: SetupIn, request: Request, claims: Dict[str, Any] = Depends(require_session)):
+    if claims.get("scope") != "setup" or not needs_setup():
+        raise HTTPException(409, "Your account is already set up.")
+    name, email = clean_name(payload.name), clean_email(payload.email)
+    check_new_password(payload.password, email)
+    await update_account(
+        name=name,
+        email=email,
+        password_hash=hash_password(payload.password),
+        password_changed_at=now_utc(),
+        token_version=int(ACCOUNT.get("token_version", 1)) + 1,
+    )
+    await record_login(request, "account_setup", True)
+    return make_token("full")
+
+
+@session.post("/account/password")
+async def change_password(payload: PasswordIn, request: Request, claims: Dict[str, Any] = Depends(require_session)):
+    scope = claims.get("scope")
+    if scope == "setup" or needs_setup():
+        raise HTTPException(409, "Finish setting up your account first.")
+    if scope == "full" and not verify_password(payload.current_password or "", ACCOUNT["password_hash"]):
+        raise HTTPException(400, "Your current password is wrong.")
+    check_new_password(payload.new_password, ACCOUNT.get("email", ""))
+    if verify_password(payload.new_password, ACCOUNT["password_hash"]):
+        raise HTTPException(400, "That's your current password. Choose a new one.")
+    await update_account(
+        password_hash=hash_password(payload.new_password),
+        password_changed_at=now_utc(),
+        token_version=int(ACCOUNT.get("token_version", 1)) + 1,
+    )
+    await record_login(request, "password_changed", True)
+    return make_token("full")  # keeps this device logged in; every other device is logged out
+
+
+@api.get("/account")
+async def get_account():
+    return account_public()
+
+
+@api.put("/account/profile")
+async def update_profile(payload: ProfileIn, request: Request):
+    name, email = clean_name(payload.name), clean_email(payload.email)
+    if email != (ACCOUNT.get("email") or "").lower():
+        if not verify_password(payload.current_password or "", ACCOUNT["password_hash"]):
+            raise HTTPException(400, "Enter your current password to change your email.")
+        await record_login(request, "email_changed", True)
+    await update_account(name=name, email=email)
+    return account_public()
+
+
+@api.put("/account/session")
+async def update_session_length(payload: SessionLengthIn):
+    if payload.session_days not in (1, 7, 30, 90):
+        raise HTTPException(400, "Choose 1, 7, 30 or 90 days.")
+    await update_account(session_days=payload.session_days)
+    return account_public()
+
+
+@api.post("/account/logout-others")
+async def logout_other_devices(request: Request):
+    await update_account(token_version=int(ACCOUNT.get("token_version", 1)) + 1)
+    await record_login(request, "logout_all", True)
+    return make_token("full")
+
+
+@api.get("/account/logins")
+async def recent_logins():
+    rows = await db().fetch(
+        "SELECT at, ip, user_agent, method, success FROM login_events ORDER BY at DESC LIMIT 25"
+    )
+    return [row_dict(r) for r in rows]
+
+
+def allowed_origin(origin: str) -> bool:
+    origin = (origin or "").rstrip("/")
+    return bool(origin) and (origin in CORS_ORIGINS or bool(CORS_ORIGIN_REGEX and re.fullmatch(CORS_ORIGIN_REGEX, origin)))
+
+
+def frontend_base(request: Request) -> Optional[str]:
+    if FRONTEND_URL:
+        return FRONTEND_URL
+    origin = request.headers.get("origin", "")
+    return origin.rstrip("/") if allowed_origin(origin) else None
+
+
+async def send_reset_email(to: str, name: str, link: str) -> bool:
+    greeting = f"Hi {html.escape(name)}," if name else "Hi,"
+    text = (
+        f"{greeting.replace('&amp;', '&')}\n\nSomeone (hopefully you) asked to reset your Charm.Studio password.\n"
+        f"Open this link within 30 minutes to choose a new one:\n\n{link}\n\n"
+        "If you didn't ask for this, ignore this email. Your password won't change."
+    )
+    body_html = (
+        f"<p>{greeting}</p><p>Someone (hopefully you) asked to reset your Charm.Studio password.</p>"
+        f'<p><a href="{html.escape(link)}" style="background:#2D4A22;color:#fff;padding:10px 16px;'
+        'border-radius:8px;text-decoration:none;display:inline-block">Choose a new password</a></p>'
+        "<p>The link works for 30 minutes. If you didn't ask for this, ignore this email. "
+        "Your password won't change.</p>"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json={"from": RESEND_FROM, "to": [to], "subject": "Reset your Charm.Studio password", "html": body_html, "text": text},
+            )
+    except httpx.HTTPError:
+        log.exception("Could not reach Resend")
+        return False
+    if resp.status_code >= 300:
+        log.error("Resend refused the reset email (%s): %s", resp.status_code, resp.text[:300])
+        return False
+    return True
+
+
+@public.post("/auth/forgot")
+async def forgot_password(payload: ForgotIn, request: Request):
+    generic = {"ok": True, "message": "If that email matches your account, a reset link is on its way. It works for 30 minutes."}
+    ip = client_ip(request)
+    if len(_recent(_forgot_requests, ip, _LOGIN_WINDOW_S)) >= _FORGOT_MAX:
+        raise HTTPException(429, "Too many reset requests. Try again in 15 minutes.")
+    _forgot_requests.setdefault(ip, []).append(time.time())
+
+    email = (payload.email or "").strip().lower()
+    if needs_setup() or not RESEND_API_KEY or not email or email != (ACCOUNT.get("email") or "").lower():
+        return generic
+    base = frontend_base(request)
+    if not base:
+        log.error("Password reset requested but FRONTEND_URL is not set and the request origin isn't allowed.")
+        return generic
+    token = new_reset_token()
+    await db().execute("DELETE FROM password_resets WHERE expires_at < now() OR used_at IS NOT NULL")
+    await db().execute(
+        "INSERT INTO password_resets (token_hash, expires_at) VALUES ($1, now() + interval '30 minutes')",
+        sha256_hex(token),
+    )
+    sent = await send_reset_email(ACCOUNT["email"], ACCOUNT.get("name", ""), f"{base}/reset-password?token={token}")
+    await record_login(request, "reset_requested", sent)
+    return generic
+
+
+@public.post("/auth/reset")
+async def reset_password(payload: ResetIn, request: Request):
+    ip = client_ip(request)
+    if len(_recent(_login_failures, ip, _LOGIN_WINDOW_S)) >= _LOGIN_MAX_FAILS:
+        raise HTTPException(429, "Too many attempts. Try again in 15 minutes.")
+    token_hash = sha256_hex((payload.token or "").strip())
+    found = await db().fetchval(
+        "SELECT 1 FROM password_resets WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()", token_hash
+    )
+    if not found or needs_setup():
+        _login_failures.setdefault(ip, []).append(time.time())
+        raise HTTPException(400, "This reset link is invalid or has expired. Request a new one.")
+    check_new_password(payload.password, ACCOUNT.get("email", ""))
+    await update_account(
+        password_hash=hash_password(payload.password),
+        password_changed_at=now_utc(),
+        token_version=int(ACCOUNT.get("token_version", 1)) + 1,
+    )
+    await db().execute("UPDATE password_resets SET used_at = now() WHERE token_hash = $1", token_hash)
+    await db().execute("DELETE FROM password_resets WHERE used_at IS NULL")
+    await record_login(request, "email_reset", True)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -839,15 +1281,25 @@ async def pdf_annotate(
 # ---------------------------------------------------------------------------
 # WhatsApp bot
 # ---------------------------------------------------------------------------
-BOT_STEPS = [
-    ("order_id", "Hi! Please send your Order ID."),
-    ("product_name", "What name should we print on the product?"),
-    ("charm", "Which charm would you like?"),
-    ("notes", "Any notes? Reply 'none' to skip."),
-]
-STEP_KEYS = [k for k, _ in BOT_STEPS]
+STEP_KEYS = ["order_id", "product_name", "charm", "notes"]
 RESET_WORDS = {"restart", "reset", "hi", "hello", "start"}
 SKIP_WORDS = {"none", "no", "skip", "-", "nil", "na", "n/a"}
+
+
+def bot_text(key: str) -> str:
+    """A bot message from Settings (falls back to the default wording)."""
+    return (SETTINGS.get("bot") or {}).get(key) or DEFAULT_SETTINGS["bot"][key]
+
+
+def bot_question(step: int) -> str:
+    return bot_text(f"ask_{STEP_KEYS[step]}")
+
+
+def fill_template(text: str, values: Dict[str, str]) -> str:
+    """Replace {placeholders} we know about; leave any other braces untouched."""
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", value)
+    return text
 
 
 def step_filled(fields: Dict[str, str], key: str) -> bool:
@@ -863,7 +1315,7 @@ def next_step(fields: Dict[str, str]) -> int:
     return len(STEP_KEYS)
 
 
-async def send_wa(cfg: Dict[str, str], to: str, text: str) -> httpx.Response:
+async def send_wa(cfg: Dict[str, Any], to: str, text: str) -> httpx.Response:
     url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{cfg['phone_id']}/messages"
     body = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
     async with httpx.AsyncClient(timeout=20) as client:
@@ -894,7 +1346,7 @@ DO UPDATE SET step = EXCLUDED.step, fields = EXCLUDED.fields, updated_at = now()
 """
 
 
-async def handle_bot_message(cfg: Dict[str, str], customer: str, text: str):
+async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     biz = cfg["logical_id"]
     conv = await db().fetchrow(
         "SELECT step, fields FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2",
@@ -906,7 +1358,7 @@ async def handle_bot_message(cfg: Dict[str, str], customer: str, text: str):
 
     if lowered in RESET_WORDS:
         await db().execute(UPSERT_CONV_SQL, biz, customer, 0, {})
-        await send_wa(cfg, customer, BOT_STEPS[0][1])
+        await send_wa(cfg, customer, bot_question(0))
         return
 
     is_new = conv is None
@@ -944,18 +1396,21 @@ async def handle_bot_message(cfg: Dict[str, str], customer: str, text: str):
         await db().execute(
             "DELETE FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2", biz, customer
         )
-        summary = (
-            "Thank you! Your order details are saved.\n\n"
-            f"Order ID: {order['order_id']}\n"
-            f"Name: {order['product_name'] or '-'}\n"
-            f"Charm: {order['charm'] or '-'}\n"
-            f"Notes: {order['notes'] or '-'}"
+        summary = fill_template(
+            bot_text("thank_you"),
+            {
+                "shop_name": (SETTINGS.get("shop") or {}).get("shop_name", ""),
+                "order_id": order["order_id"],
+                "name": order["product_name"] or "-",
+                "charm": order["charm"] or "-",
+                "notes": order["notes"] or "-",
+            },
         )
         await send_wa(cfg, customer, summary)
         return
 
     await db().execute(UPSERT_CONV_SQL, biz, customer, step, fields)
-    await send_wa(cfg, customer, BOT_STEPS[step][1])
+    await send_wa(cfg, customer, bot_question(step))
 
 
 async def process_webhook(body: Dict[str, Any]):
@@ -966,7 +1421,7 @@ async def process_webhook(body: Dict[str, Any]):
                 phone_id = (value.get("metadata") or {}).get("phone_number_id")
                 cfg = WA_NUMBERS.get(str(phone_id)) if phone_id else None
                 if not cfg:
-                    continue  # route by phone_number_id only; ignore unknown numbers
+                    continue  # unknown or paused number: ignore
                 for msg in value.get("messages", []) or []:
                     if msg.get("type") != "text" or not msg.get("id"):
                         continue
@@ -986,7 +1441,7 @@ async def process_webhook(body: Dict[str, Any]):
 
 
 def all_verify_tokens() -> set:
-    tokens = {c["verify"] for c in WA_NUMBERS.values() if c.get("verify")}
+    tokens = {c["verify"] for c in WA_ALL if c.get("verify")}
     if WA_VERIFY_TOKEN:
         tokens.add(WA_VERIFY_TOKEN)
     return tokens
@@ -1029,23 +1484,12 @@ async def wa_status(request: Request):
         "configured": bool(WA_NUMBERS),
         "verify_token_set": bool(all_verify_tokens()),
         "numbers_count": len(WA_NUMBERS),
+        "numbers_saved": len(WA_ALL),
         "callback_url": f"{public_base_url(request)}/api/wa/webhook",
         "active_conversations": active,
         "whatsapp_orders": wa_orders,
         "graph_version": WA_GRAPH_VERSION,
     }
-
-
-def mask(value: str) -> str:
-    return ("•" * max(len(value) - 4, 0)) + value[-4:] if value else ""
-
-
-@api.get("/wa/numbers")
-async def wa_numbers():
-    return [
-        {"logical_id": c["logical_id"], "display": c["display"], "phone_id": mask(c["phone_id"])}
-        for c in WA_NUMBERS.values()
-    ]
 
 
 @api.get("/wa/conversations")
@@ -1061,7 +1505,7 @@ async def wa_conversations():
 async def wa_test_send(payload: TestSendIn):
     cfg = next((c for c in WA_NUMBERS.values() if c["logical_id"] == payload.logical_id), None)
     if not cfg:
-        raise HTTPException(404, f"Unknown WhatsApp number '{payload.logical_id}'")
+        raise HTTPException(404, f"'{payload.logical_id}' isn't an active WhatsApp number.")
     to = re.sub(r"[^\d]", "", payload.to)
     if not to or not payload.text.strip():
         raise HTTPException(400, "Recipient and text are required")
@@ -1080,15 +1524,298 @@ async def wa_test_send(payload: TestSendIn):
 
 
 # ---------------------------------------------------------------------------
+# WhatsApp numbers (Settings). Tokens are encrypted at rest and never returned.
+# ---------------------------------------------------------------------------
+LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$")
+META_CHECK_FAILED = 424  # tells the frontend it may offer "Save anyway"
+
+
+class WaNumberIn(BaseModel):
+    label: str
+    phone_id: str
+    token: str
+    display: str = ""
+    verify_token: str = ""
+    skip_check: bool = False
+
+
+class WaNumberPatch(BaseModel):
+    label: Optional[str] = None
+    phone_id: Optional[str] = None
+    token: Optional[str] = None  # empty/None keeps the saved token
+    display: Optional[str] = None
+    verify_token: Optional[str] = None  # None keeps, "" clears
+    active: Optional[bool] = None
+    skip_check: bool = False
+
+
+def wa_public(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": cfg["id"],
+        "label": cfg["label"],
+        "logical_id": cfg["logical_id"],
+        "display": cfg["display"],
+        "phone_id": cfg["phone_id"],
+        "token_hint": f"••••{cfg['token_last4']}" if cfg.get("token_last4") else "",
+        "token_ok": cfg["token"] is not None,
+        "active": cfg["active"],
+        "has_verify_token": bool(cfg.get("verify")),
+        "created_at": cfg["created_at"],
+    }
+
+
+def clean_label(label: str) -> str:
+    label = " ".join((label or "").split())
+    if not LABEL_RE.match(label):
+        raise HTTPException(400, "Name: 1-40 letters, numbers, spaces, - or _ (start with a letter or number).")
+    return label
+
+
+def clean_phone_id(phone_id: str) -> str:
+    phone_id = (phone_id or "").strip()
+    if not re.fullmatch(r"\d{5,30}", phone_id):
+        raise HTTPException(400, "Phone Number ID should be the long number from Meta's API Setup page (digits only).")
+    return phone_id
+
+
+def clean_wa_token(token: str) -> str:
+    token = (token or "").strip()
+    if len(token) < 20 or " " in token:
+        raise HTTPException(400, "That access token looks incomplete. Copy the whole token from Meta.")
+    return token
+
+
+async def meta_check(phone_id: str, token: str) -> Dict[str, Any]:
+    """Ask Meta about this number. Raises HTTPException(424) with Meta's message if it's rejected."""
+    url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{phone_id}"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                url,
+                params={"fields": "display_phone_number,verified_name,quality_rating"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError:
+        raise HTTPException(META_CHECK_FAILED, "Couldn't reach Meta to check this number. Try again, or save anyway.")
+    data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    if resp.status_code >= 300:
+        msg = (data.get("error") or {}).get("message") if isinstance(data, dict) else None
+        raise HTTPException(META_CHECK_FAILED, f"Meta rejected these details: {msg or resp.status_code}")
+    return data if isinstance(data, dict) else {}
+
+
+def find_number(number_id: str) -> Dict[str, Any]:
+    cfg = next((c for c in WA_ALL if c["id"] == number_id), None)
+    if not cfg:
+        raise HTTPException(404, "That WhatsApp number no longer exists.")
+    return cfg
+
+
+def ensure_unique(label: Optional[str] = None, phone_id: Optional[str] = None, exclude: str = "") -> None:
+    for c in WA_ALL:
+        if c["id"] == exclude:
+            continue
+        if label and c["label"].casefold() == label.casefold():
+            raise HTTPException(409, f"You already have a number called '{c['label']}'.")
+        if phone_id and c["phone_id"] == phone_id:
+            raise HTTPException(409, f"This Phone Number ID is already saved as '{c['label']}'.")
+
+
+@api.get("/wa/numbers")
+async def list_wa_numbers():
+    return [wa_public(c) for c in WA_ALL]
+
+
+@api.post("/wa/numbers", status_code=201)
+async def add_wa_number(payload: WaNumberIn):
+    if not AUTH_SECRET:
+        raise HTTPException(503, "Set AUTH_SECRET on the server before saving WhatsApp numbers.")
+    label, phone_id, token = clean_label(payload.label), clean_phone_id(payload.phone_id), clean_wa_token(payload.token)
+    ensure_unique(label, phone_id)
+    display = " ".join(payload.display.split())[:40]
+    if not payload.skip_check:
+        info = await meta_check(phone_id, token)
+        display = display or info.get("display_phone_number", "")
+    number_id = str(uuid.uuid4())
+    verify = payload.verify_token.strip()
+    await db().execute(
+        "INSERT INTO wa_numbers (id, label, display, phone_id, token_enc, token_last4, verify_token_enc) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        number_id,
+        label,
+        display,
+        phone_id,
+        secret_box.encrypt(token),
+        token[-4:],
+        secret_box.encrypt(verify) if verify else "",
+    )
+    await load_wa_numbers()
+    return wa_public(find_number(number_id))
+
+
+@api.patch("/wa/numbers/{number_id}")
+async def update_wa_number(number_id: str, payload: WaNumberPatch):
+    cfg = find_number(number_id)
+    changes: Dict[str, Any] = {}
+    label = clean_label(payload.label) if payload.label is not None else None
+    phone_id = clean_phone_id(payload.phone_id) if payload.phone_id is not None else None
+    token = clean_wa_token(payload.token) if payload.token else None
+    ensure_unique(
+        label if label and label != cfg["label"] else None,
+        phone_id if phone_id and phone_id != cfg["phone_id"] else None,
+        exclude=number_id,
+    )
+    if (token or (phone_id and phone_id != cfg["phone_id"])) and not payload.skip_check:
+        check_token = token or cfg["token"]
+        if check_token:
+            await meta_check(phone_id or cfg["phone_id"], check_token)
+    if label is not None:
+        changes["label"] = label
+    if phone_id is not None:
+        changes["phone_id"] = phone_id
+    if token:
+        changes["token_enc"] = secret_box.encrypt(token)
+        changes["token_last4"] = token[-4:]
+    if payload.display is not None:
+        changes["display"] = " ".join(payload.display.split())[:40]
+    if payload.verify_token is not None:
+        v = payload.verify_token.strip()
+        changes["verify_token_enc"] = secret_box.encrypt(v) if v else ""
+    if payload.active is not None:
+        changes["active"] = payload.active
+    if changes:
+        cols = list(changes)  # fixed names from this function
+        sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
+        async with db().acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    f"UPDATE wa_numbers SET {sets}, updated_at = now() WHERE id = $1",
+                    number_id,
+                    *[changes[c] for c in cols],
+                )
+                if label and label != cfg["label"]:
+                    # keep in-progress bot chats attached to the renamed number
+                    await conn.execute(
+                        "UPDATE wa_conversations SET business_number_id = $1 WHERE business_number_id = $2",
+                        label,
+                        cfg["label"],
+                    )
+        await load_wa_numbers()
+    return wa_public(find_number(number_id))
+
+
+@api.delete("/wa/numbers/{number_id}")
+async def delete_wa_number(number_id: str):
+    cfg = find_number(number_id)
+    async with db().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM wa_numbers WHERE id = $1", number_id)
+            await conn.execute("DELETE FROM wa_conversations WHERE business_number_id = $1", cfg["label"])
+    await load_wa_numbers()
+    return {"deleted": 1}
+
+
+@api.post("/wa/numbers/{number_id}/check")
+async def check_wa_number(number_id: str):
+    cfg = find_number(number_id)
+    if cfg["token"] is None:
+        raise HTTPException(400, "The saved token can't be read any more. Edit the number and paste the token again.")
+    info = await meta_check(cfg["phone_id"], cfg["token"])
+    if not cfg["display"] and info.get("display_phone_number"):
+        await db().execute(
+            "UPDATE wa_numbers SET display = $2, updated_at = now() WHERE id = $1",
+            number_id,
+            info["display_phone_number"][:40],
+        )
+        await load_wa_numbers()
+    return {
+        "ok": True,
+        "display_phone_number": info.get("display_phone_number", ""),
+        "verified_name": info.get("verified_name", ""),
+        "quality_rating": info.get("quality_rating", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Settings: shop profile, bot wording, label defaults, system status
+# ---------------------------------------------------------------------------
+class ShopSettingsIn(BaseModel):
+    shop_name: str = Field("", max_length=60)
+
+
+class BotSettingsIn(BaseModel):
+    ask_order_id: str = Field(..., min_length=1, max_length=1000)
+    ask_product_name: str = Field(..., min_length=1, max_length=1000)
+    ask_charm: str = Field(..., min_length=1, max_length=1000)
+    ask_notes: str = Field(..., min_length=1, max_length=1000)
+    thank_you: str = Field(..., min_length=1, max_length=1500)
+
+
+class LabelSettingsIn(BaseModel):
+    position: Literal["bottom-right", "bottom-left", "top-right", "top-left"] = "bottom-right"
+    font_size: float = Field(8, ge=5, le=14)
+    skip_unmatched: bool = False
+
+
+@api.get("/settings")
+async def get_settings():
+    return {**SETTINGS, "defaults": DEFAULT_SETTINGS}
+
+
+async def _save_section(section: str, value: Dict[str, Any]):
+    await save_setting(section, value)
+    await load_settings()
+    return {**SETTINGS, "defaults": DEFAULT_SETTINGS}
+
+
+@api.put("/settings/shop")
+async def save_shop_settings(payload: ShopSettingsIn):
+    return await _save_section("shop", {"shop_name": " ".join(payload.shop_name.split())})
+
+
+@api.put("/settings/bot")
+async def save_bot_settings(payload: BotSettingsIn):
+    return await _save_section("bot", {k: v.strip() for k, v in payload.model_dump().items()})
+
+
+@api.put("/settings/labels")
+async def save_label_settings(payload: LabelSettingsIn):
+    return await _save_section("labels", payload.model_dump())
+
+
+@api.get("/system/status")
+async def system_status(request: Request):
+    if AI_PROVIDER == "ollama":
+        ai_ready = bool(OLLAMA_MODEL) and (bool(os.environ.get("OLLAMA_API_KEY", "").strip()) or "ollama.com" not in OLLAMA_BASE_URL)
+    else:
+        ai_ready = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    return {
+        "ai": {"provider": AI_PROVIDER, "model": AI_MODEL or "", "ready": ai_ready},
+        "email_reset": {
+            "configured": bool(RESEND_API_KEY),
+            "sender": RESEND_FROM,
+            "frontend_url_set": bool(FRONTEND_URL),
+            "account_email": ACCOUNT.get("email", ""),
+        },
+        "reset_override_active": bool(RESET_PASSWORD),
+        "whatsapp": {
+            "verify_token_set": bool(all_verify_tokens()),
+            "callback_url": f"{public_base_url(request)}/api/wa/webhook",
+            "saved": len(WA_ALL),
+            "active": len(WA_NUMBERS),
+            "unreadable_tokens": sum(1 for c in WA_ALL if c["token"] is None),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 app.include_router(public)
+app.include_router(session)
 app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()
-    ],
-    # Optional, e.g. https://charm-studio-.*\.vercel\.app to also allow Vercel preview deployments
-    allow_origin_regex=os.environ.get("CORS_ORIGIN_REGEX", "").strip() or None,
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

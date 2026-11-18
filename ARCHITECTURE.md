@@ -36,52 +36,62 @@ The backend is a single stateless process. All durable state lives in Postgres, 
 
 ## Backend
 
-`backend/server.py` is one module, split into sections in this order:
+`backend/server.py` holds the app; `backend/security.py` holds the crypto helpers (scrypt password hashing, HMAC token signing, AES-GCM `SecretBox`, password rules) with no app imports, so it can be reviewed on its own. `server.py` is split into sections in this order:
 
-1. **Setup**: loads `.env`, reads config, defines `SCHEMA_SQL` from `schema.sql`.
-2. **WhatsApp number config**: `load_wa_numbers()` builds `phone_number_id → {logical_id, token, display, verify}` from `WA_NUMBERS` and `WA_<ID>_*` env vars.
-3. **App and lifespan**: creates the asyncpg pool and runs `schema.sql` on startup (idempotent `CREATE ... IF NOT EXISTS`), and closes the pool on shutdown.
-4. **Authentication**: password login, signed tokens, and the `require_auth` dependency (see [Authentication](#authentication) below).
+1. **Setup**: loads `.env`, defines `SCHEMA_SQL` from `schema.sql`.
+2. **Configuration and caches**: env-based config (`AUTH_SECRET`, `RESET_PASSWORD`, Resend, CORS, legacy `WA_*`), and in-memory caches `ACCOUNT`, `SETTINGS`, `WA_ALL` / `WA_NUMBERS`, reloaded from the database at startup and after every change (single process).
+3. **App and lifespan**: creates the asyncpg pool (optionally in `DB_SCHEMA`), runs `schema.sql` (idempotent), loads the caches, and imports legacy `WA_*` numbers once.
+4. **Authentication and account**: login, first-time setup, password change and email reset, profile, sessions, login history (see [Authentication](#authentication) below).
 5. **Models**: Pydantic request bodies (`OrderIn`, `OrderPatch`, `BulkOrders`, `ExtractIn`, `TestSendIn`).
 6. **Orders and stats**: CRUD, search, bulk insert, CSV export, stats.
 7. **AI helpers**: `get_ai()` (provider-aware client), `claude_text()`, JSON parsing, chunking and dedupe.
 8. **AI extraction endpoints**: `/api/extract`, `/api/extract/bulk-file`.
 9. **PDF Label Studio**: ID detection, matching, sticker drawing, `/api/pdf/analyze`, `/api/pdf/annotate`.
-10. **WhatsApp bot**: conversation state machine, webhook endpoints, status, test send.
-11. **Middleware**: CORS, including the exposed `X-Matched-Pages`, `X-Not-Found-Pages` and `Content-Disposition` headers.
+10. **WhatsApp bot**: conversation state machine (wording from `SETTINGS["bot"]`), webhook endpoints, status, test send.
+11. **WhatsApp numbers**: add / edit / pause / delete / check with Meta; tokens encrypted at rest.
+12. **Settings**: shop profile, bot wording, label defaults, system status.
+13. **Middleware**: CORS, including the exposed `X-Matched-Pages`, `X-Not-Found-Pages` and `Content-Disposition` headers.
 
-Every route sits under the `/api` prefix. There are two routers: `public` (no login: `/`, `/health`, `/auth/login`, and the WhatsApp webhook `GET`/`POST /wa/webhook`) and `api`, which carries `dependencies=[Depends(require_auth)]` so every route on it needs a valid token.
+Every route sits under the `/api` prefix. There are three routers:
+- `public`, with no login: `/`, `/health`, `/auth/config`, `/auth/login`, `/auth/forgot`, `/auth/reset`, and the WhatsApp webhook `GET`/`POST /wa/webhook`.
+- `session`, which accepts any valid token: `/auth/me`, `/account/setup`, `/account/password`.
+- `api`, which needs a full-access token on every route.
 
 ### Database access
 
 - `asyncpg.create_pool(DATABASE_URL, statement_cache_size=0, ...)`. Statement caching is off so the pool also works behind Supabase's transaction pooler (PgBouncer), which doesn't support prepared statements.
 - A per-connection `init` registers JSON codecs, so `jsonb` columns come back as Python dicts.
 - Rows are turned into plain dicts by `row_dict()`, which also converts `datetime` to an ISO-8601 string. The API never exposes database internals; every record is identified by its own `id` string (a UUID4).
-- SQL is always parameterized (`$1, $2, …`). The only dynamic SQL is the `UPDATE` column list in `PATCH /orders/{id}`, and its column names come from the Pydantic model's fields, never from request data.
+- SQL is always parameterized (`$1, $2, …`). The only dynamic SQL is the `UPDATE` column lists in `PATCH /orders/{id}`, `update_account()` and `PATCH /wa/numbers/{id}`, and their column names come from code, never from request data.
+- Optional `DB_SCHEMA` sets the connection `search_path` to a separate schema (created if missing). The tests use it to run against a throwaway `charm_test` schema in the production database without touching real tables.
 
 ### Authentication
 
-The app has one user, the seller, so it uses a single admin password rather than user accounts.
+One owner account (single-row `account` table) with name, email and a scrypt password hash.
 
 ```
-POST /api/auth/login {password}
-   ├─ 10 wrong passwords from one IP within 15 min -> 429 (in-memory counter; resets on restart)
-   ├─ hmac.compare_digest(password, ADMIN_PASSWORD) fails -> 401
-   └─ ok -> {token, expires_at}
+POST /api/auth/login {email, password}
+   ├─ 10 failures from one IP in 15 min -> 429 (in-memory counter; resets on restart)
+   ├─ RESET_PASSWORD set and matches             -> scope "password" (or "setup" if never set up)
+   ├─ account not set up: ADMIN_PASSWORD matches -> scope "setup"   (first login only)
+   ├─ email matches (case-insensitive) and scrypt password verifies -> scope "full"
+   └─ otherwise -> 401, recorded in login_events
 
-token = base64url({"sub":"admin","iat":…,"exp":…}) + "." + base64url(HMAC-SHA256(key, payload))
-key   = HMAC-SHA256(AUTH_SECRET, "charm-studio:" + ADMIN_PASSWORD)
+token = base64url({"sub":"owner","scope":…,"iat":…,"exp":…}) + "." + base64url(HMAC-SHA256(key, payload))
+key   = HMAC-SHA256(AUTH_SECRET, "charm-studio:v2:" + password_hash + ":" + token_version)
+exp   = session_days (1/7/30/90) for "full"; 1 hour for "setup" / "password"
 
-every protected route -> require_auth():
-   auth not configured -> 503 "Login is not set up"
-   missing / bad signature / expired token -> 401
+require_session(): any valid token          require_full(): scope must be "full" (else 403)
 ```
 
-- **Revocation:** the signing key is derived from both `AUTH_SECRET` and `ADMIN_PASSWORD`, so changing either one invalidates every token already issued (logs every device out). There is no per-token revocation list.
-- **Fails closed:** auth counts as configured only when `ADMIN_PASSWORD` is at least 8 characters, `AUTH_SECRET` at least 32, and neither is an unedited `<placeholder>` from `.env.example`. Otherwise every protected route returns 503, so a misconfigured deploy never runs open.
-- **Frontend:** `src/lib/auth.js` stores the token in `localStorage` (falling back to memory if storage is blocked). An axios request interceptor adds `Authorization: Bearer …`. A response interceptor turns any 401 into a logout event, which `App.js` handles by showing the login screen. On load, a saved token is checked with `GET /api/auth/me`.
-- **Downloads:** CSV export and the annotated PDF are fetched through axios as blobs, so they carry the token. A plain `<a href>` link can't send it.
-- **Webhook:** `/api/wa/webhook` has to stay public because Meta calls it. It is protected by the verify token for the handshake, and should also check Meta's signature (see the gaps below).
+- **Scopes:** a `setup` token can only call `/account/setup` (name, email, new password). A `password` token, from `RESET_PASSWORD`, can only call `/account/password` without the old password. Both then return a fresh full token.
+- **Revocation:** the key includes the password hash and `token_version`. Changing the password, resetting it, finishing setup, or "log out all other devices" (which bumps `token_version`) invalidates every earlier token. The endpoints that do this return a new token, so the current device stays logged in.
+- **Email reset:** `POST /auth/forgot` always gives the same reply (no account enumeration), rate-limited to 5 per IP per 15 minutes. If the email matches and `RESEND_API_KEY` is set, it stores the SHA-256 of a random token (30-minute expiry) in `password_resets` and emails `FRONTEND_URL/reset-password?token=…` through the Resend API. If `FRONTEND_URL` isn't set, it uses the request's `Origin`, but only when that origin is allowed by CORS. `POST /auth/reset` accepts each token once, then deletes every other pending link.
+- **Password rules** (`password_problem`, mirrored in `src/lib/session.js` for instant feedback): 8–128 characters, not in a short list of common passwords, at least 3 distinct characters, not equal to the email.
+- **Fails closed:** without `AUTH_SECRET` (32+ chars), or before setup without `ADMIN_PASSWORD` or `RESET_PASSWORD`, protected routes return 503. Unedited `<placeholder>` values count as unset.
+- **Frontend:** `src/lib/auth.js` stores the token in `localStorage` (memory fallback). An axios interceptor adds `Authorization: Bearer …`, and any 401 outside the public auth routes fires a logout event. `App.js` reads `/auth/me` and shows Login, AccountSetup (setup or password scope), or the app. `/reset-password` renders without logging in.
+- **Downloads:** CSV export and the annotated PDF are fetched through axios as blobs so they carry the token.
+- **Webhook:** `/api/wa/webhook` has to stay public because Meta calls it. The handshake is protected by `WA_VERIFY_TOKEN` or a per-number verify token; payload signatures aren't checked yet (see the gaps below).
 
 ### Data model
 
@@ -101,7 +111,21 @@ created_at    timestamptz
 - `orders.order_id` is **not unique**: the same marketplace ID can be recorded twice, for example once from a chat and once by hand. Label matching uses the newest matching order first (orders are loaded `ORDER BY created_at DESC`; exact matches are ranked ahead of fuzzy ones).
 - `wa_conversations` holds one row per customer per business number, only while a bot conversation is in progress. The row is deleted when the order is saved.
 - `wa_events` is the dedupe log for incoming WhatsApp message IDs.
-- All three tables have Row Level Security enabled with no policies. That blocks Supabase's public REST API (anon or authenticated keys). The backend connects as the table owner, which RLS doesn't restrict.
+
+```
+account (1 row)               wa_numbers                         app_settings          login_events        password_resets
+──────────────────────        ───────────────────────────        ──────────────        ───────────────     ────────────────
+id            = 1             id               text PK           key   text PK         id bigserial PK     token_hash text PK
+name, email                   label            text UNIQUE       value jsonb           at, ip, user_agent  expires_at
+password_hash (scrypt)        display, phone_id (UNIQUE)          (shop, bot, labels,   method, success     used_at
+token_version, session_days   token_enc        AES-GCM "v1:…"      wa_env_imported)     (kept 90 days)
+password_changed_at           token_last4, verify_token_enc
+                              active (pause)
+```
+
+- `wa_numbers.label` is the number's name. It's also the conversation key (`wa_conversations.business_number_id`) and the order `channel`. Renaming a number moves its in-progress chats; old orders keep the old name.
+- Tokens are encrypted with `SecretBox` (AES-256-GCM, key = HMAC-SHA256(`AUTH_SECRET`, "charm-studio:secrets")). If `AUTH_SECRET` changes, they can't be decrypted: the number shows "Re-enter token" and is skipped by the bot.
+- All tables have Row Level Security enabled with no policies. That blocks Supabase's public REST API (anon or authenticated keys). The backend connects as the table owner, which RLS doesn't restrict.
 
 ### AI provider layer
 
@@ -128,17 +152,21 @@ claude_text(system, user, max_tokens, effort)
 
 ```
 src/
-  index.js, App.js            Router: / /orders /extract /labels /bot, plus <Toaster/>
+  index.js, App.js            Auth state machine + Router: / /orders /extract /labels /bot /settings, /reset-password
   lib/api.js                  axios instance (baseURL = REACT_APP_BACKEND_URL + /api) and one function per endpoint
+  lib/auth.js, lib/session.js token storage; SessionContext (me, settings); client-side password rules
   lib/utils.js                cn(), date helpers, emptyOrder()
   components/Layout.jsx       fixed sidebar (desktop) / top bar and drawer (mobile), <Outlet/>
   components/common.jsx       PageHeader, StatCard, SourceBadge, EmptyState, EditableRows
   components/ui/              shadcn-style primitives on Radix: button, primitives (input, card, badge,
                               switch, table, alert…), overlays (dialog, confirm, tabs, accordion, select)
-  pages/                      Dashboard, Orders, WhatsAppExtract, LabelStudio, WhatsAppBot
+  components/AuthShell.jsx    card layout for Login, AccountSetup, ResetPassword; PasswordInput.jsx
+  pages/                      Dashboard, Orders, WhatsAppExtract, LabelStudio, WhatsAppBot, Settings,
+                              Login, AccountSetup, ResetPassword
+  pages/settings/             AccountTab, WhatsAppNumbersTab, ShopBotTab, LabelsTab, SecurityTab
 ```
 
-- State is local to each page (`useState`); there is no global store. Each page fetches what it needs on mount.
+- State is mostly local to each page (`useState`). The logged-in account and app settings live in `SessionContext` (used by the sidebar, Settings and Label Studio defaults).
 - `EditableRows` is the shared preview grid for AI results and CSV imports: rows stay editable until the user clicks Save, which calls `POST /orders/bulk`.
 - The theme lives in `tailwind.config.js`: `forest` `#2D4A22`, `terracotta` `#D97757`, `cream` `#F7F5F0`, Manrope for headings and IBM Plex Sans for body text.
 - Every interactive element has a `data-testid`.
@@ -206,20 +234,20 @@ Generate ──POST /api/pdf/annotate (file, position, skip_unmatched, font_size
 ```
 Meta ──POST /api/wa/webhook──> respond 200 immediately ── BackgroundTask: process_webhook(body)
    for entry.changes[].value:
-     cfg = WA_NUMBERS[value.metadata.phone_number_id]   (unknown number -> ignore)
+     cfg = WA_NUMBERS[value.metadata.phone_number_id]   (unknown or paused number -> ignore)
      for each text message:
         INSERT wa_events(message_id) ON CONFLICT DO NOTHING   (duplicate delivery -> skip)
         handle_bot_message(cfg, from, text)
 
 handle_bot_message:
-   "hi|hello|start|reset|restart"  -> reset the conversation to step 0, ask for the Order ID
+   "hi|hello|start|reset|restart"  -> reset the conversation to step 0, send bot.ask_order_id
    message has 6+ words            -> AI extracts {order_id, product_name, charm, notes}, fills blanks
    new chat, short, no digits      -> just greet
    otherwise                       -> the reply answers the current step ("none/no/skip/-" = empty notes)
    next = first unanswered step
    all answered -> INSERT orders (source=whatsapp, channel=logical id, order_id or "wa-xxxxxxxx"),
-                   DELETE the conversation, send a summary
-   else         -> UPSERT wa_conversations(step, fields), send the next question
+                   DELETE the conversation, send bot.thank_you with {shop_name} {order_id} {name} {charm} {notes}
+   else         -> UPSERT wa_conversations(step, fields), send the next bot.ask_* question
 
 Replies: POST https://graph.facebook.com/{WA_GRAPH_VERSION}/{phone_id}/messages  (Bearer token)
 ```
@@ -228,7 +256,9 @@ Steps: `order_id → product_name → charm → notes`. `notes` counts as answer
 
 Routing is by `phone_number_id` only, so several business numbers can share one deployment and one webhook URL. Each order records which number it came from in `channel`.
 
-`GET /api/wa/webhook` handles Meta's verification handshake. It echoes `hub.challenge` when `hub.verify_token` matches `WA_VERIFY_TOKEN` or any per-number `WA_<ID>_VERIFY`.
+`GET /api/wa/webhook` handles Meta's verification handshake. It echoes `hub.challenge` when `hub.verify_token` matches `WA_VERIFY_TOKEN` or any saved number's verify token.
+
+Numbers are managed in Settings (`/api/wa/numbers`). Adding a number or changing its token or phone ID first calls `GET graph.facebook.com/{version}/{phone_id}` with the token. A rejection returns **424**, and the UI offers "Save anyway" (`skip_check`). The check also fills in the display number.
 
 ## Configuration
 
@@ -241,8 +271,13 @@ All configuration comes from environment variables: `backend/.env` locally and t
 | `AI_PROVIDER` | `anthropic` (default) or `ollama` |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude |
 | `OLLAMA_API_KEY`, `OLLAMA_MODEL`, `OLLAMA_BASE_URL` | Ollama Cloud or a self-hosted server |
-| `WA_GRAPH_VERSION`, `WA_VERIFY_TOKEN`, `WA_NUMBERS`, `WA_<ID>_PHONE_ID/TOKEN/DISPLAY/VERIFY` | WhatsApp Cloud API |
-| `ADMIN_PASSWORD`, `AUTH_SECRET`, `AUTH_TOKEN_DAYS` | login password, token-signing secret (32+ chars), token lifetime (default 30 days) |
+| `WA_GRAPH_VERSION`, `WA_VERIFY_TOKEN` | WhatsApp Cloud API version, webhook verify token |
+| `WA_NUMBERS`, `WA_<ID>_*` | legacy; imported into Settings once |
+| `AUTH_SECRET` | signs logins and encrypts saved tokens (32+ chars); don't change once numbers are saved |
+| `ADMIN_PASSWORD` | first login only (account setup) |
+| `RESET_PASSWORD` | emergency login that forces a new password; remove after use |
+| `RESEND_API_KEY`, `RESEND_FROM`, `FRONTEND_URL` | password reset emails and where their links point |
+| `DB_SCHEMA` | optional separate Postgres schema (testing) |
 | `PUBLIC_BASE_URL` | optional override for the callback URL shown on the Bot page |
 | `REACT_APP_BACKEND_URL` (frontend) | API base URL, baked into the bundle at build time |
 
@@ -266,7 +301,9 @@ What's in place:
 - **Password login** on every API route except health, login and the WhatsApp webhook, with signed, expiring tokens and a lockout after 10 wrong passwords (see [Authentication](#authentication)).
 - Secrets live only in backend env vars; the frontend bundle contains just the API URL. Both `.env` files are git-ignored.
 - RLS blocks Supabase's public REST API from reading the tables.
-- WhatsApp tokens never leave the server. `/api/wa/numbers` masks phone number IDs.
+- Passwords are stored as scrypt hashes; reset links are stored only as SHA-256 hashes, expire in 30 minutes and work once.
+- WhatsApp tokens are AES-GCM encrypted at rest and never returned by the API (only the last 4 characters).
+- Recent logins and account changes are recorded in `login_events` and shown in Settings → Security.
 - SQL is parameterized.
 
 **Gaps still open:**
@@ -284,10 +321,13 @@ What's in place:
 - **Helvetica can't draw non-Latin scripts** (Devanagari, for example); those names won't render on stickers.
 - **`wa_events` grows forever.** A periodic `DELETE … WHERE received_at < now() - interval '30 days'` would keep it small.
 - **One process, no background worker.** Webhook tasks run inside the web process.
+- **The account, settings and number caches live in memory.** That's correct for one instance; running several instances would need them reloaded from the database on each request (or a pub/sub signal).
+- **The login and reset rate limits are in memory** too, so they reset on restart and aren't shared between instances.
 
 ## Extension points
 
 - **New marketplace ID formats**: add a regex to `ID_PATTERNS` (order matters; earlier patterns win).
 - **New order fields**: update `schema.sql` (add a column with `ALTER TABLE … ADD COLUMN IF NOT EXISTS`), `ORDER_COLUMNS`, `build_order()`, `order_args()`, the Pydantic models, the extraction prompts, and the form and columns in `Orders.jsx` and `EditableRows`.
 - **Another AI provider**: add a branch to `get_ai()` and `claude_text()`.
-- **More bot steps**: extend `BOT_STEPS`. `next_step()` and the frontend progress bar follow from it (`STEP_LABELS` in `WhatsAppBot.jsx`).
+- **More bot steps**: extend `STEP_KEYS` and add an `ask_<step>` entry to `DEFAULT_SETTINGS["bot"]` and `BotSettingsIn`. Then add the field to `BOT_FIELDS` in `ShopBotTab.jsx` and `STEP_LABELS` in `WhatsAppBot.jsx`.
+- **A new setting**: add a section or key to `DEFAULT_SETTINGS` and a Pydantic model with a `PUT /settings/<section>` route. Stored values are merged over the defaults, so older rows keep working.

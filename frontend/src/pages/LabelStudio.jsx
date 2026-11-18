@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   FilePdf,
@@ -26,8 +26,9 @@ import { Card, CardContent, Badge, Input, Label, Switch, Spinner } from "../comp
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, SimpleSelect, Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/overlays";
 import { Button } from "../components/ui/button";
 import { cn } from "../lib/utils";
+import { useSession } from "../lib/session";
 
-const POSITIONS = [
+export const POSITIONS = [
   { value: "bottom-right", label: "Bottom right" },
   { value: "bottom-left", label: "Bottom left" },
   { value: "top-right", label: "Top right" },
@@ -41,7 +42,7 @@ const STATUS = {
   no_id: { label: "No ID", variant: "neutral", icon: MinusCircle },
 };
 
-function StickerPreview({ position }) {
+export function StickerPreview({ position }) {
   const pos = {
     "bottom-right": "bottom-1.5 right-1.5",
     "bottom-left": "bottom-1.5 left-1.5",
@@ -187,9 +188,21 @@ export default function LabelStudio() {
   const [analysis, setAnalysis] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const [position, setPosition] = useState("bottom-right");
-  const [skipUnmatched, setSkipUnmatched] = useState(false);
-  const [fontSize, setFontSize] = useState(8);
+  const { settings } = useSession();
+  const defaults = settings?.labels;
+  const [position, setPosition] = useState(defaults?.position || "bottom-right");
+  const [skipUnmatched, setSkipUnmatched] = useState(!!defaults?.skip_unmatched);
+  const [fontSize, setFontSize] = useState(defaults?.font_size || 8);
+  // Settings may arrive after this page opens: apply the saved defaults once.
+  const appliedDefaults = useRef(!!defaults);
+  useEffect(() => {
+    if (defaults && !appliedDefaults.current) {
+      appliedDefaults.current = true;
+      setPosition(defaults.position);
+      setSkipUnmatched(!!defaults.skip_unmatched);
+      setFontSize(defaults.font_size);
+    }
+  }, [defaults]);
   const [overrides, setOverrides] = useState({}); // page -> order
   const [activePage, setActivePage] = useState(null);
   const [orders, setOrders] = useState([]);
