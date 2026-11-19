@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
-import { SquaresFour, Package, ChatsCircle, Tag, Robot, List, X, Sparkle, SignOut, GearSix } from "@phosphor-icons/react";
+import { SquaresFour, Package, ChatsCircle, ChatCenteredText, Tag, Robot, List, X, Sparkle, SignOut, GearSix } from "@phosphor-icons/react";
 import { cn } from "../lib/utils";
 import { useSession } from "../lib/session";
+import { getUnread } from "../lib/api";
 
 export const NAV = [
   { to: "/", label: "Dashboard", icon: SquaresFour, id: "dashboard" },
+  { to: "/chats", label: "Chats", icon: ChatCenteredText, id: "chats", badge: "unread" },
   { to: "/orders", label: "Orders", icon: Package, id: "orders" },
   { to: "/extract", label: "WhatsApp Extract", icon: ChatsCircle, id: "extract" },
   { to: "/labels", label: "Label Studio", icon: Tag, id: "labels" },
@@ -33,7 +35,7 @@ function Logo({ shopName }) {
   );
 }
 
-function NavItem({ to, label, icon: Icon, id, onNavigate }) {
+function NavItem({ to, label, icon: Icon, id, onNavigate, count = 0 }) {
   return (
     <NavLink
       to={to}
@@ -50,18 +52,46 @@ function NavItem({ to, label, icon: Icon, id, onNavigate }) {
       {({ isActive }) => (
         <>
           <Icon size={19} weight={isActive ? "fill" : "regular"} />
-          {label}
+          <span className="flex-1">{label}</span>
+          {count > 0 && (
+            <span
+              className="grid h-5 min-w-5 place-items-center rounded-full bg-terracotta px-1.5 text-[10px] font-bold text-white"
+              data-testid={`nav-${id}-badge`}
+            >
+              {count > 99 ? "99+" : count}
+            </span>
+          )}
         </>
       )}
     </NavLink>
   );
 }
 
+// Unread customer messages, for the Chats badge.
+function useUnread() {
+  const [unread, setUnread] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      getUnread()
+        .then((d) => alive && setUnread(d.unread || 0))
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 15000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+  return unread;
+}
+
 function NavItems({ onNavigate }) {
+  const unread = useUnread();
   return (
     <nav className="flex flex-col gap-1">
-      {NAV.map((item) => (
-        <NavItem key={item.to} {...item} onNavigate={onNavigate} />
+      {NAV.map(({ badge, ...item }) => (
+        <NavItem key={item.to} {...item} count={badge === "unread" ? unread : 0} onNavigate={onNavigate} />
       ))}
     </nav>
   );

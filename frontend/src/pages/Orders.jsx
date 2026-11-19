@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router";
 import Papa from "papaparse";
 import { toast } from "sonner";
 import {
@@ -11,6 +12,8 @@ import {
   Check,
   X,
   Package,
+  FilePdf,
+  ChatCenteredText,
 } from "@phosphor-icons/react";
 import {
   getOrders,
@@ -20,6 +23,7 @@ import {
   deleteAllOrders,
   bulkOrders,
   exportOrdersCsv,
+  downloadOrderSheet,
   errorMessage,
 } from "../lib/api";
 import { PageHeader, SourceBadge, EmptyState, EditableRows } from "../components/common";
@@ -45,6 +49,105 @@ function mapCsvRow(row) {
   return out;
 }
 
+const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const toInput = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const fromInput = (v) => {
+  const [y, m, d] = v.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+const niceDay = (d) => d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+
+function OrderSheetDialog({ open, onClose }) {
+  const today = dayStart(new Date());
+  const [mode, setMode] = useState("today");
+  const [from, setFrom] = useState(toInput(today));
+  const [to, setTo] = useState(toInput(today));
+  const [busy, setBusy] = useState(false);
+
+  const download = async () => {
+    let start;
+    let endDay;
+    if (mode === "today") start = endDay = today;
+    else if (mode === "yesterday") start = endDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+    else {
+      if (!from || !to) return toast.error("Pick both dates");
+      start = fromInput(from);
+      endDay = fromInput(to);
+      if (endDay < start) return toast.error("The end date is before the start date");
+    }
+    const end = new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate() + 1);
+    const title = start.getTime() === endDay.getTime() ? niceDay(start) : `${niceDay(start)} to ${niceDay(endDay)}`;
+    setBusy(true);
+    try {
+      await downloadOrderSheet(start, end, title);
+      onClose();
+    } catch (e) {
+      let msg = errorMessage(e);
+      if (e?.response?.data instanceof Blob) {
+        try {
+          msg = JSON.parse(await e.response.data.text()).detail || msg;
+        } catch {
+          /* keep default */
+        }
+      }
+      toast.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Order sheet PDF</DialogTitle>
+          <DialogDescription>A printable table of every order received in the period: time, order ID, name, charm, notes and phone.</DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            ["today", "Today"],
+            ["yesterday", "Yesterday"],
+            ["custom", "Pick dates"],
+          ].map(([v, l]) => (
+            <button
+              key={v}
+              type="button"
+              data-testid={`sheet-mode-${v}`}
+              onClick={() => setMode(v)}
+              className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                mode === v ? "border-forest bg-forest-50 text-forest" : "border-line text-muted hover:border-forest/40"
+              }`}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+        {mode === "custom" && (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="sheet-from">From</Label>
+              <Input id="sheet-from" type="date" data-testid="sheet-from-input" value={from} max={toInput(today)} onChange={(e) => setFrom(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="sheet-to">To</Label>
+              <Input id="sheet-to" type="date" data-testid="sheet-to-input" value={to} max={toInput(today)} onChange={(e) => setTo(e.target.value)} />
+            </div>
+            <p className="col-span-2 text-xs text-muted">Up to 3 months at a time.</p>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} data-testid="sheet-cancel-btn">
+            Cancel
+          </Button>
+          <Button onClick={download} disabled={busy} data-testid="sheet-download-btn">
+            {busy ? <Spinner /> : <FilePdf size={16} />} Download PDF
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function Orders() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -56,6 +159,7 @@ export default function Orders() {
   const [importRows, setImportRows] = useState(null);
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
   const fileRef = useRef(null);
 
   const exportCsv = async () => {
@@ -187,6 +291,9 @@ export default function Orders() {
         subtitle="Every customisation you have recorded, ready to stamp onto labels."
         actions={
           <>
+            <Button variant="outline" data-testid="order-sheet-btn" onClick={() => setSheetOpen(true)}>
+              <FilePdf size={16} /> Order sheet PDF
+            </Button>
             <Button variant="outline" data-testid="export-csv-btn" onClick={exportCsv} disabled={exporting}>
               {exporting ? <Spinner /> : <DownloadSimple size={16} />} Export CSV
             </Button>
@@ -238,7 +345,7 @@ export default function Orders() {
             <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
             <Input
               data-testid="orders-search-input"
-              placeholder="Search ID, name, charm, notes"
+              placeholder="Search ID, name, charm, notes, phone"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="pl-9"
@@ -262,6 +369,7 @@ export default function Orders() {
                   <TH>Name on product</TH>
                   <TH>Charm</TH>
                   <TH>Notes</TH>
+                  <TH>Phone</TH>
                   <TH>Source</TH>
                   <TH>Created</TH>
                   <TH className="pr-5 text-right">Actions</TH>
@@ -281,6 +389,7 @@ export default function Orders() {
                           />
                         </TD>
                       ))}
+                      <TD className="whitespace-nowrap font-mono text-xs text-muted">{o.customer_phone ? `+${o.customer_phone}` : "—"}</TD>
                       <TD>
                         <SourceBadge source={o.source} />
                       </TD>
@@ -303,6 +412,24 @@ export default function Orders() {
                       <TD>{o.charm || <span className="text-muted">—</span>}</TD>
                       <TD className="max-w-[220px] truncate" title={o.notes}>
                         {o.notes || <span className="text-muted">—</span>}
+                      </TD>
+                      <TD className="whitespace-nowrap">
+                        {o.customer_phone ? (
+                          o.channel ? (
+                            <Link
+                              to={`/chats?number=${encodeURIComponent(o.channel)}&phone=${o.customer_phone}`}
+                              className="inline-flex items-center gap-1 font-mono text-xs text-forest hover:underline"
+                              title="Open the chat"
+                              data-testid={`order-chat-link-${o.id}`}
+                            >
+                              <ChatCenteredText size={13} /> +{o.customer_phone}
+                            </Link>
+                          ) : (
+                            <span className="font-mono text-xs text-muted">+{o.customer_phone}</span>
+                          )
+                        ) : (
+                          <span className="text-muted">—</span>
+                        )}
                       </TD>
                       <TD>
                         <SourceBadge source={o.source} />
@@ -335,6 +462,8 @@ export default function Orders() {
           )}
         </CardContent>
       </Card>
+
+      <OrderSheetDialog open={sheetOpen} onClose={() => setSheetOpen(false)} />
 
       <Dialog open={!!importRows} onOpenChange={(v) => !v && setImportRows(null)}>
         <DialogContent className="max-w-4xl">

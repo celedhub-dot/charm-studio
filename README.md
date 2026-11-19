@@ -6,10 +6,11 @@ Charm.Studio is for a small seller who takes customised-charm orders on WhatsApp
 
 ## Features
 
-- **Orders:** add, search, edit and delete orders inline; import and export CSV; delete all (with confirmation).
+- **Chats (team inbox):** every customer chat from your WhatsApp numbers in one place. Search by phone, name, order ID or anything the customer wrote. Each chat shows the orders the bot saved for that customer, which staff can edit, and staff reply from the app through the business number (WhatsApp allows free-form replies within 24 hours of the customer's last message). Messages your team sends from the WhatsApp Business phone app show up too (coexistence). One shared login.
+- **Orders:** add, search (also by customer phone), edit and delete orders inline; import and export CSV; delete all (with confirmation). **Order sheet PDF:** a printable table of every order received today, yesterday or in a date range.
 - **WhatsApp Extract:** paste chat text, or upload an exported chat `.txt`, and AI turns it into orders you can edit before saving. Large chats are split into chunks and duplicates are merged.
 - **Label Studio:** drop in a label PDF and see each page's detected Order ID and matched order. Fix unmatched pages by hand, then download a copy with a small customisation sticker in a corner of each label, away from the barcode.
-- **WhatsApp Bot:** customers message your business number, and the bot collects Order ID, name, charm and notes, then saves the order. It supports several numbers.
+- **WhatsApp Bot:** each number has a bot mode. **Read only** quietly reads every chat and saves the order ID, name, charm and notes it finds, never messaging customers (use this when staff also chat on the number). **Ask questions** has the bot ask the customer step by step. **Off** just stores messages for Chats. Supports several numbers, connected directly through Meta or through 360dialog.
 - **Dashboard:** order counts (total, today, from WhatsApp, by source), recent orders and shortcuts.
 - **Settings:** your account (name, email, password), WhatsApp numbers (add, check, pause, delete; tokens stored encrypted), shop name, the bot's message wording, Label Studio defaults, and security (session length, log out other devices, recent activity, system status).
 
@@ -25,7 +26,7 @@ render.yaml  Render Blueprint for the API
 
 ```
 Browser ──> Vercel (React) ──HTTPS──> Render (FastAPI) ──> Supabase (Postgres)
-Meta WhatsApp ──webhook──────────────┘        └──> Claude / Ollama API
+Meta / 360dialog ──webhook───────────┘        └──> Claude / Ollama API
 ```
 
 ## 1. Database (Supabase)
@@ -120,7 +121,22 @@ The bot's wording (greeting, each question, thank-you message with `{shop_name}`
 
 **Local testing:** Meta needs public HTTPS. Run `ngrok http 8001` and use `https://<ngrok-id>.ngrok-free.app/api/wa/webhook` with the same verify token.
 
-Bot flow: it asks for Order ID, then name to print, then charm, then notes ("none" skips notes). If a message has 6 or more words, the AI extracts every field it can from it and the bot skips the steps already answered. Sending `hi`, `hello`, `start`, `reset` or `restart` starts over. When all four answers are in, the order is saved with `source=whatsapp`.
+Bot modes are picked per number when you add or edit it. Meta numbers default to **Ask questions**, 360dialog numbers to **Read only**.
+
+**Ask questions** flow: it asks for Order ID, then name to print, then charm, then notes ("none" skips notes). If a message has 6 or more words, the AI extracts every field it can from it and the bot skips the steps already answered. Sending `hi`, `hello`, `start`, `reset` or `restart` starts over. When all four answers are in, the order is saved with `source=whatsapp`.
+
+### WhatsApp through 360dialog (coexistence)
+
+Use this when the number is also used in the WhatsApp Business phone app, so the team keeps chatting on the phone while Charm.Studio reads the chats and lets staff reply from the browser.
+
+1. Sign up at 360dialog and connect the number with **coexistence** (scan the QR code from the WhatsApp Business app). This keeps the phone app working.
+2. In the 360dialog Hub, create an **API key** for that number.
+3. In Charm.Studio: **Settings → WhatsApp numbers → Add number → 360dialog**. Enter the number with country code (e.g. `918339039324`) and the API key, and keep the bot on **Read only**.
+4. The app points the number's webhook at itself automatically (`/api/wa/webhook/n/<id>/<secret>`). The card's "Copy webhook URL" is only needed if you ever set it by hand.
+
+360dialog doesn't sign webhooks, so each number gets its own unguessable webhook URL instead. The bot waits `READ_DEBOUNCE_SECONDS` (default 20) after a customer's last message before reading the chat, so a customer typing in several short messages costs one AI call. Without an AI key it still saves order IDs it finds by pattern. It never overwrites fields staff have edited.
+
+**AI cost:** for reading chats, Claude Haiku is the cheapest option that works well. Set `ANTHROPIC_MODEL=claude-haiku-5-5` on Render. At roughly 1,500 messages a day this costs about ₹10 a day.
 
 ## API summary
 
@@ -137,6 +153,13 @@ Bot flow: it asks for Order ID, then name to print, then charm, then notes ("non
 | POST | `/api/pdf/analyze` | detect IDs and matches per page, with thumbnails |
 | POST | `/api/pdf/annotate` | stamped PDF; `X-Matched-Pages` / `X-Not-Found-Pages` headers |
 | GET/POST | `/api/wa/webhook` | Meta verification / incoming messages |
+| POST | `/api/wa/webhook/n/{id}/{key}` | incoming messages for one number (360dialog) |
+| GET | `/api/inbox/conversations` | chat list (`?q=` searches phone, name, order ID, message text; `?number=`) |
+| GET | `/api/inbox/conversations/{number}/{phone}` | one chat: messages, contact, orders; marks it read |
+| POST | `/api/inbox/conversations/{number}/{phone}/read-orders` | have the bot read the chat again now |
+| POST | `/api/inbox/send` | staff reply (409 when the 24-hour window is closed) |
+| GET | `/api/inbox/unread` | unread chat count for the nav badge |
+| GET | `/api/orders/sheet.pdf` | order sheet PDF (`start`, `end` ISO times, `tz` minutes, `title`; up to 93 days) |
 | GET | `/api/wa/status`, `/api/wa/numbers`, `/api/wa/conversations` | bot status |
 | POST | `/api/wa/test-send` | send a test message |
 | GET | `/api/health` | health check (used by Render) |
@@ -150,11 +173,11 @@ Bot flow: it asks for Order ID, then name to print, then charm, then notes ("non
 | POST/GET | `/api/account/logout-others`, `/api/account/logins` | log out other devices / recent activity |
 | GET/POST | `/api/wa/numbers` | list / add WhatsApp numbers |
 | PATCH/DELETE | `/api/wa/numbers/{id}` | edit, pause/resume, replace token / delete |
-| POST | `/api/wa/numbers/{id}/check` | check a number with Meta |
+| POST | `/api/wa/numbers/{id}/check` | check a number with Meta or 360dialog |
 | GET/PUT | `/api/settings`, `/api/settings/{shop,bot,labels}` | app settings |
 | GET | `/api/system/status` | email, AI, WhatsApp setup status |
 
-Every route needs `Authorization: Bearer <token>` except `/api/health`, `/api/auth/config`, `/api/auth/login`, `/api/auth/forgot`, `/api/auth/reset` and the WhatsApp webhook (`GET`/`POST /api/wa/webhook`), which Meta must be able to reach. Tokens from the first login or from `RESET_PASSWORD` only allow finishing setup or choosing a new password.
+Every route needs `Authorization: Bearer <token>` except `/api/health`, `/api/auth/config`, `/api/auth/login`, `/api/auth/forgot`, `/api/auth/reset` and the WhatsApp webhooks (`GET`/`POST /api/wa/webhook` and `POST /api/wa/webhook/n/...`), which Meta and 360dialog must be able to reach. Tokens from the first login or from `RESET_PASSWORD` only allow finishing setup or choosing a new password.
 
 ## Tests
 
@@ -165,10 +188,17 @@ cd backend
 .venv/Scripts/python.exe tests/test_account_and_settings.py
 ```
 
+`backend/tests/test_inbox.py` does the same for Chats in a `charm_test_inbox` schema: webhooks (Meta and 360dialog), phone-app echoes, delivery statuses, the read-only bot, search, staff replies, the 24-hour window and the order sheet. 360dialog is faked.
+
+```bash
+cd backend
+.venv/Scripts/python.exe tests/test_inbox.py
+```
+
 ## Notes
 
 - **AI provider** (`AI_PROVIDER`):
-  - `anthropic` (default): `claude-sonnet-5-5` with server-side refusal fallbacks turned on (`fallbacks: "default"`). Set `ANTHROPIC_MODEL` to use a different model. The key comes from platform.claude.com and is billed separately from a Claude Pro subscription.
+  - `anthropic` (default): `claude-sonnet-5-5` with server-side refusal fallbacks turned on (`fallbacks: "default"`). Set `ANTHROPIC_MODEL` to use a different model; `claude-haiku-5-5` is the cheapest choice for reading chats. The key comes from platform.claude.com and is billed separately from a Claude Pro subscription.
   - `ollama`: Ollama's Anthropic-compatible endpoint. Set `OLLAMA_API_KEY` and `OLLAMA_MODEL`. `OLLAMA_BASE_URL` defaults to Ollama Cloud (`https://ollama.com`); point it at `http://localhost:11434` for a local server, which needs no key. Open models can be less consistent at returning clean JSON, so review the preview table before saving.
 - Stickers use Helvetica (a built-in PDF font). It cannot draw non-Latin scripts such as Devanagari, so write those names in Latin letters.
 - Order matching: IDs are compared after removing non-alphanumerics and uppercasing. Two IDs match if they are equal, or if the shorter one is at least 8 characters long and shares an 8-character run with the longer one.

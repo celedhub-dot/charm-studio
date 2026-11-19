@@ -104,13 +104,31 @@ product_name  text  (name to print)      step               int   (0..3)
 charm         text                       fields             jsonb (answers so far)
 notes         text                       started_at         timestamptz
 source        text  manual|ai|csv|whatsapp  updated_at      timestamptz
-channel       text  (logical WA number id)
+channel       text  (WA number name)
+customer_phone text (digits only; links to Chats)
 created_at    timestamptz
 ```
 
 - `orders.order_id` is **not unique**: the same marketplace ID can be recorded twice, for example once from a chat and once by hand. Label matching uses the newest matching order first (orders are loaded `ORDER BY created_at DESC`; exact matches are ranked ahead of fuzzy ones).
 - `wa_conversations` holds one row per customer per business number, only while a bot conversation is in progress. The row is deleted when the order is saved.
 - `wa_events` is the dedupe log for incoming WhatsApp message IDs.
+
+```
+wa_messages                                    wa_contacts
+───────────────────────────────────────        ─────────────────────────────────────
+id text PK (uuid4)                             number_label, customer_phone  PK
+number_label, customer_phone                   name (WhatsApp profile name)
+direction  in|out                              last_message_at, last_inbound_at
+kind, body                                     last_preview, unread
+                                               (unread resets when opened)
+status  received|sent|delivered|read|failed
+source  customer|bot|staff|phone_app
+error, created_at
+```
+
+- `wa_messages` is every message in and out, including replies sent from the WhatsApp Business phone app (coexistence `smb_message_echoes`). Status updates only move forward (`sent → delivered → read`, or `failed`).
+- `wa_contacts` is one row per chat, for the Chats list. `last_inbound_at` drives the 24-hour reply window.
+- `wa_numbers` also has `provider` (`meta` | `360dialog`), `bot_mode` (`ask` | `read` | `off`) and `webhook_key` (the secret in a 360dialog number's webhook URL). Deleting a number keeps its message history.
 
 ```
 account (1 row)               wa_numbers                         app_settings          login_events        password_resets
@@ -258,6 +276,12 @@ Routing is by `phone_number_id` only, so several business numbers can share one 
 
 `GET /api/wa/webhook` handles Meta's verification handshake. It echoes `hub.challenge` when `hub.verify_token` matches `WA_VERIFY_TOKEN` or any saved number's verify token.
 
+**Bot modes.** `ask` is the flow above. `read` never messages customers: each incoming message schedules a debounced task (`READ_DEBOUNCE_SECONDS`, default 20). When the chat goes quiet, the AI reads the recent messages with `CHAT_EXTRACT_SYSTEM` (or the regex `detect_ids` when no AI is set up) and `save_extracted_order` creates orders or fills only *blank* fields of existing ones, so staff edits win. `off` only records messages.
+
+**360dialog.** Same message JSON as Meta, sent to `D360_BASE_URL` (`https://waba-v2.360dialog.io`) `/messages` with a `D360-API-KEY` header. Its webhooks aren't signed, so each number gets `POST /api/wa/webhook/n/{number_id}/{webhook_key}` with a random key; adding a number sets it through `POST /v1/configs/webhook`. Payloads use Meta's `entry[].changes[].value` shape; a flat `value` is accepted too.
+
+**Chats (inbox).** `/api/inbox/*` reads `wa_contacts` and `wa_messages`. Staff replies go through `send_wa(..., source="staff")` and are refused with 409 outside the 24-hour window (templates aren't supported yet). The frontend polls: the chat list every 5 s, an open chat every 4 s, the unread badge every 15 s.
+
 Numbers are managed in Settings (`/api/wa/numbers`). Adding a number or changing its token or phone ID first calls `GET graph.facebook.com/{version}/{phone_id}` with the token. A rejection returns **424**, and the UI offers "Save anyway" (`skip_check`). The check also fills in the display number.
 
 ## Configuration
@@ -278,7 +302,9 @@ All configuration comes from environment variables: `backend/.env` locally and t
 | `RESET_PASSWORD` | emergency login that forces a new password; remove after use |
 | `RESEND_API_KEY`, `RESEND_FROM`, `FRONTEND_URL` | password reset emails and where their links point |
 | `DB_SCHEMA` | optional separate Postgres schema (testing) |
-| `PUBLIC_BASE_URL` | optional override for the callback URL shown on the Bot page |
+| `PUBLIC_BASE_URL` | optional override for the public URL used for webhook callbacks |
+| `READ_DEBOUNCE_SECONDS` | read-only bot: quiet time before reading a chat (default 20) |
+| `D360_BASE_URL` | 360dialog API base (default `https://waba-v2.360dialog.io`) |
 | `REACT_APP_BACKEND_URL` (frontend) | API base URL, baked into the bundle at build time |
 
 ## Deployment

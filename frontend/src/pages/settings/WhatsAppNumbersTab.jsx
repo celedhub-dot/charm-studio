@@ -12,16 +12,24 @@ import {
   WarningCircle,
   Info,
   FloppyDisk,
+  Copy,
 } from "@phosphor-icons/react";
 import { waNumbers, addWaNumber, updateWaNumber, deleteWaNumber, checkWaNumber, errorMessage } from "../../lib/api";
 import { Badge, Input, Label, Spinner, Alert } from "../../components/ui/primitives";
 import { Button } from "../../components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, ConfirmDialog } from "../../components/ui/overlays";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, ConfirmDialog, SimpleSelect } from "../../components/ui/overlays";
 import { EmptyState } from "../../components/common";
 import PasswordInput from "../../components/PasswordInput";
 import { formatDate } from "../../lib/utils";
 
-const EMPTY = { label: "", phone_id: "", token: "", display: "", verify_token: "" };
+const EMPTY = { label: "", provider: "meta", phone_id: "", token: "", display: "", verify_token: "", bot_mode: "" };
+
+export const BOT_MODES = [
+  { value: "read", label: "Read only: save order details, never message customers" },
+  { value: "ask", label: "Ask questions: the bot asks for Order ID, name, charm and notes" },
+  { value: "off", label: "Off: just store messages for Chats" },
+];
+const BOT_MODE_SHORT = { read: "Bot reads & saves orders", ask: "Bot asks questions", off: "Bot off" };
 
 function NumberDialog({ open, number, onClose, onSaved }) {
   const editing = !!number;
@@ -30,10 +38,24 @@ function NumberDialog({ open, number, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [metaFailed, setMetaFailed] = useState(false);
+  const provider = editing ? number.provider || "meta" : form.provider;
+  const d360 = provider === "360dialog";
 
   useEffect(() => {
     if (!open) return;
-    setForm(number ? { label: number.label, phone_id: number.phone_id, token: "", display: number.display, verify_token: "" } : EMPTY);
+    setForm(
+      number
+        ? {
+            label: number.label,
+            provider: number.provider || "meta",
+            phone_id: number.phone_id,
+            token: "",
+            display: number.display,
+            verify_token: "",
+            bot_mode: number.bot_mode || "ask",
+          }
+        : EMPTY
+    );
     setClearVerify(false);
     setError("");
     setMetaFailed(false);
@@ -44,22 +66,28 @@ function NumberDialog({ open, number, onClose, onSaved }) {
     setMetaFailed(false);
   };
 
+  const idLabel = d360 ? "WhatsApp number (with country code)" : "Phone Number ID";
+  const tokenLabel = d360 ? "360dialog API key" : "Access token";
+
   const save = async (skipCheck = false) => {
     if (!form.label.trim() || !form.phone_id.trim() || (!editing && !form.token.trim())) {
-      return setError(editing ? "Name and Phone Number ID are required." : "Name, Phone Number ID and access token are required.");
+      return setError(`Name, ${idLabel}${editing ? "" : ` and ${tokenLabel}`} are required.`);
     }
     setSaving(true);
     setError("");
     try {
       let saved;
+      const botMode = form.bot_mode || (d360 ? "read" : "ask");
       if (editing) {
-        const patch = { label: form.label, phone_id: form.phone_id, display: form.display, skip_check: skipCheck };
+        const patch = { label: form.label, phone_id: form.phone_id, display: form.display, bot_mode: botMode, skip_check: skipCheck };
         if (form.token.trim()) patch.token = form.token.trim();
-        if (clearVerify) patch.verify_token = "";
-        else if (form.verify_token.trim()) patch.verify_token = form.verify_token.trim();
+        if (!d360) {
+          if (clearVerify) patch.verify_token = "";
+          else if (form.verify_token.trim()) patch.verify_token = form.verify_token.trim();
+        }
         saved = await updateWaNumber(number.id, patch);
       } else {
-        saved = await addWaNumber({ ...form, skip_check: skipCheck });
+        saved = await addWaNumber({ ...form, bot_mode: botMode, verify_token: d360 ? "" : form.verify_token, skip_check: skipCheck });
       }
       toast.success(editing ? "Number updated" : `${saved.label} added${saved.display ? ` (${saved.display})` : ""}`);
       onSaved();
@@ -78,7 +106,10 @@ function NumberDialog({ open, number, onClose, onSaved }) {
         <DialogHeader>
           <DialogTitle>{editing ? `Edit ${number.label}` : "Add a WhatsApp number"}</DialogTitle>
           <DialogDescription>
-            Find these in the Meta Developer Console under WhatsApp, then API Setup. The token is encrypted before it's saved and is never shown again.
+            {d360
+              ? "Paste this number's API key from the 360dialog Hub. Charm.Studio points the number's webhook here automatically."
+              : "Find these in the Meta Developer Console under WhatsApp, then API Setup."}{" "}
+            The key or token is encrypted before it's saved and is never shown again.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -89,56 +120,117 @@ function NumberDialog({ open, number, onClose, onSaved }) {
           }}
           data-testid="wa-number-form"
         >
+          {!editing && (
+            <div className="space-y-1.5">
+              <Label>Connected through</Label>
+              <div className="grid grid-cols-2 gap-2" role="radiogroup">
+                {[
+                  ["meta", "Meta directly", "Phone Number ID + access token"],
+                  ["360dialog", "360dialog", "API key (works with coexistence)"],
+                ].map(([value, title, sub]) => (
+                  <button
+                    type="button"
+                    key={value}
+                    role="radio"
+                    aria-checked={form.provider === value}
+                    data-testid={`wa-provider-${value}`}
+                    onClick={() => setForm({ ...form, provider: value, bot_mode: "" })}
+                    className={`rounded-xl border p-3 text-left transition-colors ${
+                      form.provider === value ? "border-forest bg-forest-50" : "border-line hover:border-forest/40"
+                    }`}
+                  >
+                    <div className="text-sm font-semibold text-ink">{title}</div>
+                    <div className="text-xs text-muted">{sub}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="wa-label">Name</Label>
               <Input id="wa-label" data-testid="wa-label-input" placeholder="e.g. Main shop" value={form.label} onChange={set("label")} maxLength={40} />
-              <p className="text-xs text-muted">Shown on orders that came from this number.</p>
+              <p className="text-xs text-muted">Shown on orders and chats from this number.</p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="wa-display">Display number (optional)</Label>
-              <Input id="wa-display" data-testid="wa-display-input" placeholder="Filled in from Meta" value={form.display} onChange={set("display")} maxLength={40} />
+              <Input
+                id="wa-display"
+                data-testid="wa-display-input"
+                placeholder={d360 ? "e.g. +91 83390 39324" : "Filled in from Meta"}
+                value={form.display}
+                onChange={set("display")}
+                maxLength={40}
+              />
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="wa-phone-id">Phone Number ID</Label>
-            <Input id="wa-phone-id" data-testid="wa-phone-id-input" inputMode="numeric" placeholder="e.g. 106540352242922" value={form.phone_id} onChange={set("phone_id")} className="font-mono" />
+            <Label htmlFor="wa-phone-id">{idLabel}</Label>
+            <Input
+              id="wa-phone-id"
+              data-testid="wa-phone-id-input"
+              inputMode="numeric"
+              autoComplete="off"
+              placeholder={d360 ? "e.g. 918339039324" : "e.g. 106540352242922"}
+              value={form.phone_id}
+              onChange={set("phone_id")}
+              className="font-mono"
+            />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="wa-token">{editing ? "Access token (leave blank to keep the saved one)" : "Access token"}</Label>
+            <Label htmlFor="wa-token">{editing ? `${tokenLabel} (leave blank to keep the saved one)` : tokenLabel}</Label>
             <PasswordInput
               id="wa-token"
               testId="wa-token-input"
-              autoComplete="off"
-              placeholder={editing ? `Saved token ${number.token_hint}` : "Starts with EAA..."}
+              autoComplete="new-password"
+              placeholder={editing ? `Saved ${number.token_hint}` : d360 ? "From the 360dialog Hub (API key for this number)" : "Starts with EAA..."}
               value={form.token}
               onChange={set("token")}
             />
-            <p className="text-xs text-muted">Use a permanent token from a System User (Business Settings), not the 24-hour test token.</p>
+            {!d360 && <p className="text-xs text-muted">Use a permanent token from a System User (Business Settings), not the 24-hour test token.</p>}
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="wa-verify">Webhook verify token (optional)</Label>
-            <PasswordInput
-              id="wa-verify"
-              testId="wa-verify-input"
-              autoComplete="off"
-              placeholder={editing && number.has_verify_token && !clearVerify ? "Saved (leave blank to keep)" : "Only if this number uses its own verify token"}
-              value={form.verify_token}
-              onChange={set("verify_token")}
+            <Label>What the bot does</Label>
+            <SimpleSelect
+              value={form.bot_mode || (d360 ? "read" : "ask")}
+              onValueChange={(v) => setForm({ ...form, bot_mode: v })}
+              options={BOT_MODES}
+              testId="wa-bot-mode-select"
             />
-            {editing && number.has_verify_token && (
-              <label className="flex items-center gap-2 text-xs text-muted">
-                <input type="checkbox" checked={clearVerify} onChange={(e) => setClearVerify(e.target.checked)} data-testid="wa-clear-verify" /> Remove the saved verify token
-              </label>
-            )}
+            <p className="text-xs text-muted">
+              Use <b>Read only</b> when your team also chats on this number, so the bot never talks over them.
+            </p>
           </div>
+          {!d360 && (
+            <div className="space-y-1.5">
+              <Label htmlFor="wa-verify">Webhook verify token (optional)</Label>
+              <PasswordInput
+                id="wa-verify"
+                testId="wa-verify-input"
+                autoComplete="off"
+                placeholder={editing && number.has_verify_token && !clearVerify ? "Saved (leave blank to keep)" : "Only if this number uses its own verify token"}
+                value={form.verify_token}
+                onChange={set("verify_token")}
+              />
+              {editing && number.has_verify_token && (
+                <label className="flex items-center gap-2 text-xs text-muted">
+                  <input type="checkbox" checked={clearVerify} onChange={(e) => setClearVerify(e.target.checked)} data-testid="wa-clear-verify" /> Remove the saved
+                  verify token
+                </label>
+              )}
+            </div>
+          )}
 
           {error && (
             <Alert variant="warning" data-testid="wa-form-error">
               <WarningCircle size={18} weight="fill" className="shrink-0" />
               <div>
                 <div>{error}</div>
-                {metaFailed && <div className="mt-1 text-xs opacity-80">Double-check the Phone Number ID and token. If you're sure they're right, you can save anyway and check the connection later.</div>}
+                {metaFailed && (
+                  <div className="mt-1 text-xs opacity-80">
+                    {d360 ? "Double-check the API key." : "Double-check the Phone Number ID and token."} If you're sure it's right, you can save anyway and use Check later.
+                  </div>
+                )}
               </div>
             </Alert>
           )}
@@ -194,16 +286,33 @@ function NumberCard({ n, onEdit, onChanged }) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-heading font-bold text-ink">{n.label}</span>
             <Badge variant={status.variant}>{status.label}</Badge>
+            <Badge variant="outline">{n.provider === "360dialog" ? "360dialog" : "Meta"}</Badge>
+            <Badge variant="neutral">{BOT_MODE_SHORT[n.bot_mode] || "Bot asks questions"}</Badge>
           </div>
           <div className="mt-0.5 text-sm text-ink">{n.display || <span className="text-muted">No display number yet</span>}</div>
           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted">
             <span>
-              ID <span className="font-mono">{n.phone_id}</span>
+              {n.provider === "360dialog" ? "Number" : "ID"} <span className="font-mono">{n.phone_id}</span>
             </span>
-            <span>Token {n.token_hint || "—"}</span>
+            <span>
+              {n.provider === "360dialog" ? "API key" : "Token"} {n.token_hint || "—"}
+            </span>
             {n.has_verify_token && <span>Own verify token</span>}
             <span>Added {formatDate(n.created_at)}</span>
           </div>
+          {n.webhook_url && (
+            <button
+              type="button"
+              className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-forest hover:underline"
+              onClick={() => {
+                navigator.clipboard?.writeText(n.webhook_url);
+                toast.success("Webhook URL copied");
+              }}
+              data-testid={`wa-copy-webhook-${n.id}`}
+            >
+              <Copy size={12} /> Copy webhook URL (only needed if you set it in 360dialog by hand)
+            </button>
+          )}
         </div>
       </div>
       <div className="flex flex-wrap gap-1.5">
@@ -211,7 +320,7 @@ function NumberCard({ n, onEdit, onChanged }) {
           size="sm"
           variant="outline"
           disabled={!!busy || !n.token_ok}
-          onClick={() => run("check", () => checkWaNumber(n.id), (r) => `Connected: ${r.verified_name || r.display_phone_number || "OK"}`)}
+          onClick={() => run("check", () => checkWaNumber(n.id), (r) => r.message || `Connected: ${r.verified_name || r.display_phone_number || "OK"}`)}
           data-testid={`wa-check-${n.id}`}
         >
           {busy === "check" ? <Spinner /> : <PlugsConnected size={14} />} Check
@@ -265,7 +374,8 @@ export default function WhatsAppNumbersTab() {
     <div className="grid gap-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="max-w-2xl text-sm text-muted">
-          The bot answers customers on every <b>active</b> number here. Webhook setup in Meta is explained on the{" "}
+          Chats from every <b>active</b> number show up in Chats, and the bot on each one does what its mode says. 360dialog numbers set
+          their webhook automatically; webhook setup in Meta is explained on the{" "}
           <Link to="/bot" className="font-medium text-forest hover:underline">
             WhatsApp Bot
           </Link>{" "}

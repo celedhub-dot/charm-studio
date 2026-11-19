@@ -84,7 +84,7 @@ These came from the original spec. Keep them unless there's a good reason to cha
 | 2026-11-18 | Settings also covers: shop name, bot message wording (one set, any language, placeholders like `{shop_name}`), Label Studio defaults, and security (session length 1/7/30/90 days, log out other devices, recent activity, system status). AI keys stay in Render (status only). | Seller's picks. Keeping AI keys out of the database means fewer stored secrets. |
 | 2026-11-18 | Added optional `DB_SCHEMA` and an end-to-end test suite that runs in a throwaway schema. | Local and production share one Supabase database, so tests must never touch the real tables. |
 
-## Current status (2026-11-18)
+## Current status (2026-11-19)
 
 **Done and verified locally:**
 - The backend connects to the real Supabase project: tables are created, and order create, search and delete work.
@@ -96,12 +96,15 @@ These came from the original spec. Keep them unless there's a good reason to cha
 - The live site runs on Vercel (`charm-studio-silk.vercel.app`) and Render (`charm-studio-api.onrender.com`, free plan, Singapore), with CORS set up.
 - The Settings and account features pass 72 automated backend checks (setup, login, password change, email change, log out others, email reset, emergency reset, WhatsApp numbers with encryption, bot wording, label defaults, restart persistence). They were also clicked through in the browser against a throwaway schema.
 - The code is pushed to GitHub (`main`).
+- Chats (team inbox), 360dialog numbers, bot modes, `customer_phone` on orders and the order sheet PDF pass 33 automated checks (`tests/test_inbox.py`) and were clicked through in the browser with simulated 360dialog webhooks on the local `charm_dev` schema.
 
 **Not yet done or verified:**
 - The Settings and account version isn't deployed yet. On first deploy, the owner must log in once with Render's `ADMIN_PASSWORD` and complete account setup.
 - Resend isn't configured yet (`RESEND_API_KEY`, `FRONTEND_URL`), so "Forgot password?" shows the `RESET_PASSWORD` instructions instead.
 - No real AI call has been made yet: no `ANTHROPIC_API_KEY` or Ollama key is configured.
-- The WhatsApp bot hasn't been tested against a real Meta number yet (none added).
+- The WhatsApp bot hasn't been tested against a real Meta or 360dialog number yet (none added).
+- The main number 83390 39324 had a temporary WhatsApp restriction (several staff on WhatsApp Web). Plan: once it lifts, connect it to 360dialog with coexistence and add it in Settings as a 360dialog number in Read-only mode, so staff chat in Charm.Studio instead of WhatsApp Web.
+- Staff can't start a chat or reply after 24 hours yet: that needs approved message templates.
 - No real Meesho or Flipkart label PDF has been tried yet; only generated test PDFs.
 
 ## Open items, roughly by priority
@@ -109,7 +112,8 @@ These came from the original spec. Keep them unless there's a good reason to cha
 1. **Rotate the Supabase database password** (it was exposed in a chat log during setup), then update `backend/.env` and Render.
 2. Deploy the Settings version, complete account setup on the live site, then add `RESEND_API_KEY` and `FRONTEND_URL` on Render and test "Forgot password?".
 3. **Verify Meta's `X-Hub-Signature-256`** on the webhook (needs the Meta App Secret as a new env var).
-4. Add the real WhatsApp number in Settings and test the bot end to end.
+4. Connect 83390 39324 through 360dialog (coexistence), add it in Settings in Read-only mode, set `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL=claude-haiku-5-5` on Render, and test Chats end to end.
+4a. Message templates in Chats, so staff can message customers after the 24-hour window.
 5. Test with real label PDFs from both marketplaces. Check sticker placement, rotated pages and ID detection.
 6. Housekeeping: prune old `wa_events` rows; consider making webhook handling durable.
 

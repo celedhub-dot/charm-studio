@@ -117,4 +117,23 @@ export const updateWaNumber = (id, data) => api.patch(`/wa/numbers/${id}`, data)
 export const deleteWaNumber = (id) => api.delete(`/wa/numbers/${id}`).then((r) => r.data);
 export const checkWaNumber = (id) => api.post(`/wa/numbers/${id}/check`).then((r) => r.data);
 export const waConversations = () => api.get("/wa/conversations").then((r) => r.data);
+
+// Chats (team inbox)
+const threadPath = (label, phone) => `/inbox/conversations/${encodeURIComponent(label)}/${encodeURIComponent(phone)}`;
+export const getConversations = (q, number) =>
+  api.get("/inbox/conversations", { params: { q: q || undefined, number: number || undefined } }).then((r) => r.data);
+export const getThread = (label, phone) => api.get(threadPath(label, phone)).then((r) => r.data);
+export const readOrdersAgain = (label, phone) => api.post(`${threadPath(label, phone)}/read-orders`).then((r) => r.data);
+export const sendInboxMessage = (numberLabel, to, text) =>
+  api.post("/inbox/send", { number_label: numberLabel, to, text }).then((r) => r.data);
+export const getUnread = () => api.get("/inbox/unread").then((r) => r.data);
+
+// Order sheet PDF for a period (start/end are Date objects in the user's local time)
+export const downloadOrderSheet = async (start, end, title) => {
+  const res = await api.get("/orders/sheet.pdf", {
+    params: { start: start.toISOString(), end: end.toISOString(), tz: -new Date().getTimezoneOffset(), title },
+    responseType: "blob",
+  });
+  downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "order_sheet.pdf"));
+};
 export const waTestSend = (data) => api.post("/wa/test-send", data).then((r) => r.data);

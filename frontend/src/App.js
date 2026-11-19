@@ -8,6 +8,7 @@ import WhatsAppExtract from "./pages/WhatsAppExtract";
 import LabelStudio from "./pages/LabelStudio";
 import WhatsAppBot from "./pages/WhatsAppBot";
 import Settings from "./pages/Settings";
+import Chats from "./pages/Chats";
 import Login from "./pages/Login";
 import AccountSetup from "./pages/AccountSetup";
 import ResetPassword from "./pages/ResetPassword";
@@ -94,6 +95,7 @@ function AppRoutes() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="chats" element={<Chats />} />
           <Route path="orders" element={<Orders />} />
           <Route path="extract" element={<WhatsAppExtract />} />
           <Route path="labels" element={<LabelStudio />} />

@@ -85,6 +85,48 @@ CREATE TABLE IF NOT EXISTS password_resets (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Added later: link orders to the customer's WhatsApp number.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_phone text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS orders_customer_phone_idx ON orders (customer_phone);
+
+-- Added later: how each number connects and how its bot behaves.
+--   provider: 'meta' (Phone Number ID + token) or '360dialog' (API key)
+--   bot_mode: 'ask' (asks the customer step by step), 'read' (only reads and saves orders), 'off'
+--   webhook_key: secret part of the per-number webhook address (360dialog)
+ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS provider    text NOT NULL DEFAULT 'meta';
+ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS bot_mode    text NOT NULL DEFAULT 'ask';
+ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS webhook_key text NOT NULL DEFAULT '';
+
+-- Every WhatsApp message in and out (customer, bot, staff, or sent from the phone app).
+CREATE TABLE IF NOT EXISTS wa_messages (
+    id             text PRIMARY KEY,
+    number_label   text NOT NULL,
+    customer_phone text NOT NULL,
+    direction      text NOT NULL,                 -- 'in' | 'out'
+    kind           text NOT NULL DEFAULT 'text',  -- text, image, document, audio, video, sticker, location, ...
+    body           text NOT NULL DEFAULT '',
+    wa_message_id  text,
+    status         text NOT NULL DEFAULT '',      -- received, sent, delivered, read, failed
+    source         text NOT NULL DEFAULT '',      -- customer, bot, staff, phone_app
+    error          text NOT NULL DEFAULT '',
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS wa_messages_wamid_idx ON wa_messages (wa_message_id) WHERE wa_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS wa_messages_thread_idx ON wa_messages (number_label, customer_phone, created_at DESC);
+
+-- One row per customer per number: what the Chats list shows.
+CREATE TABLE IF NOT EXISTS wa_contacts (
+    number_label    text NOT NULL,
+    customer_phone  text NOT NULL,
+    name            text NOT NULL DEFAULT '',
+    last_preview    text NOT NULL DEFAULT '',
+    last_message_at timestamptz NOT NULL DEFAULT now(),
+    last_inbound_at timestamptz,
+    unread          int  NOT NULL DEFAULT 0,
+    PRIMARY KEY (number_label, customer_phone)
+);
+CREATE INDEX IF NOT EXISTS wa_contacts_recent_idx ON wa_contacts (last_message_at DESC);
+
 -- Lock the tables away from Supabase's public REST API (anon/authenticated keys).
 -- The backend connects as the table owner, which is not affected by RLS.
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
@@ -95,3 +137,5 @@ ALTER TABLE app_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE wa_numbers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE login_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE password_resets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE wa_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE wa_contacts ENABLE ROW LEVEL SECURITY;

@@ -14,10 +14,11 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -60,7 +61,7 @@ log = logging.getLogger("charm_studio")
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 ORDER_FIELDS = ("order_id", "product_name", "charm", "notes")
-ORDER_COLUMNS = "id, order_id, product_name, charm, notes, source, channel, created_at"
+ORDER_COLUMNS = "id, order_id, product_name, charm, notes, source, channel, created_at, customer_phone"
 SOURCES = ("manual", "ai", "csv", "whatsapp")
 
 SCHEMA_SQL = (ROOT_DIR / "schema.sql").read_text(encoding="utf-8")
@@ -152,7 +153,12 @@ def env_wa_numbers() -> List[Dict[str, str]]:
 ACCOUNT: Dict[str, Any] = {}
 SETTINGS: Dict[str, Dict[str, Any]] = {}
 WA_ALL: List[Dict[str, Any]] = []  # every saved number; "token" is None if it can't be decrypted
-WA_NUMBERS: Dict[str, Dict[str, Any]] = {}  # phone_id -> config, only active numbers with a readable token
+WA_NUMBERS: Dict[str, Dict[str, Any]] = {}  # phone_id -> config, active Meta numbers with a readable token
+
+
+def active_numbers() -> List[Dict[str, Any]]:
+    """Active numbers of any provider whose token can be read."""
+    return [c for c in WA_ALL if c["active"] and c["token"]]
 
 DEFAULT_SETTINGS: Dict[str, Dict[str, Any]] = {
     "shop": {"shop_name": ""},
@@ -229,10 +235,13 @@ async def load_wa_numbers() -> None:
             "verify": verify,
             "active": r["active"],
             "created_at": iso(r["created_at"]),
+            "provider": r["provider"] or "meta",
+            "bot_mode": r["bot_mode"] or "ask",
+            "webhook_key": r["webhook_key"] or "",
         }
         WA_ALL.append(cfg)
-        if r["active"] and token:
-            WA_NUMBERS[r["phone_id"]] = cfg
+        if r["active"] and token and cfg["provider"] == "meta":
+            WA_NUMBERS[r["phone_id"]] = cfg  # Meta webhooks are routed by phone_number_id
     if any(c["token"] is None for c in WA_ALL):
         log.warning("Some saved WhatsApp tokens can't be decrypted (was AUTH_SECRET changed?). Re-enter them in Settings.")
 
@@ -298,7 +307,7 @@ async def lifespan(_: FastAPI):
         "Charm.Studio ready. Account set up: %s. WhatsApp numbers: %d saved, %d active.",
         not needs_setup(),
         len(WA_ALL),
-        len(WA_NUMBERS),
+        len(active_numbers()),
     )
     if RESET_PASSWORD:
         log.warning("RESET_PASSWORD is set. Log in with it, choose a new password, then remove it from the environment.")
@@ -700,6 +709,7 @@ class OrderIn(BaseModel):
     notes: str = ""
     source: str = "manual"
     channel: str = ""
+    customer_phone: str = ""
 
 
 class OrderPatch(BaseModel):
@@ -709,6 +719,7 @@ class OrderPatch(BaseModel):
     notes: Optional[str] = None
     source: Optional[str] = None
     channel: Optional[str] = None
+    customer_phone: Optional[str] = None
 
 
 class BulkOrders(BaseModel):
@@ -738,14 +749,18 @@ def build_order(data: Dict[str, Any]) -> Dict[str, Any]:
         "source": source,
         "channel": str(data.get("channel") or ""),
         "created_at": now_utc(),
+        "customer_phone": re.sub(r"\D", "", str(data.get("customer_phone") or "")),
     }
 
 
 def order_args(d: Dict[str, Any]) -> tuple:
-    return (d["id"], d["order_id"], d["product_name"], d["charm"], d["notes"], d["source"], d["channel"], d["created_at"])
+    return (
+        d["id"], d["order_id"], d["product_name"], d["charm"], d["notes"],
+        d["source"], d["channel"], d["created_at"], d["customer_phone"],
+    )
 
 
-INSERT_ORDER_SQL = f"INSERT INTO orders ({ORDER_COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"
+INSERT_ORDER_SQL = f"INSERT INTO orders ({ORDER_COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)"
 
 
 async def insert_order(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -785,6 +800,7 @@ async def list_orders(q: Optional[str] = None):
         rows = await db().fetch(
             f"""SELECT {ORDER_COLUMNS} FROM orders
                 WHERE order_id ILIKE $1 OR product_name ILIKE $1 OR charm ILIKE $1 OR notes ILIKE $1
+                   OR customer_phone ILIKE $1
                 ORDER BY created_at DESC""",
             like,
         )
@@ -796,7 +812,7 @@ async def list_orders(q: Optional[str] = None):
 async def export_orders_csv():
     orders = await load_all_orders()
     buf = io.StringIO()
-    cols = ["order_id", "product_name", "charm", "notes", "source", "created_at"]
+    cols = ["order_id", "product_name", "charm", "notes", "customer_phone", "source", "created_at"]
     writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     writer.writeheader()
     for o in orders:
@@ -806,6 +822,92 @@ async def export_orders_csv():
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="charm_orders.csv"'},
     )
+
+
+def _parse_when(value: str, name: str) -> datetime:
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        raise HTTPException(400, f"'{name}' must be a date and time like 2026-11-19T00:00:00+05:30.")
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def build_order_sheet(orders: List[Dict[str, Any]], heading: str, subtitle: str, tz_minutes: int) -> bytes:
+    """A4 table of orders: time, order ID, name to print, charm, notes, customer phone."""
+    width, height, margin = 595, 842, 36
+    cols = [("#", 20), ("Time", 44), ("Order ID", 108), ("Name on product", 92), ("Charm", 80), ("Notes", 111), ("Phone", 68)]
+    row_h, head_h, fs = 24, 18, 7.5
+    stripe, rule, grey = (0.96, 0.95, 0.92), (0.88, 0.86, 0.82), (0.45, 0.45, 0.45)
+    shift = timedelta(minutes=tz_minutes)
+    multi_day = len({(datetime.fromisoformat(o["created_at"]) + shift).date() for o in orders}) > 1
+    doc = fitz.open()
+
+    def new_page(first: bool):
+        page = doc.new_page(width=width, height=height)
+        y = margin
+        if first:
+            page.insert_text((margin, y + 14), heading, fontname="hebo", fontsize=15, color=GREEN)
+            page.insert_text((margin, y + 32), subtitle, fontname="helv", fontsize=9, color=INK)
+            y += 44
+        page.draw_rect(fitz.Rect(margin, y, width - margin, y + head_h), color=GREEN, fill=GREEN)
+        x = margin
+        for name, w in cols:
+            page.insert_text((x + 4, y + 12), name, fontname="hebo", fontsize=fs, color=WHITE)
+            x += w
+        return page, y + head_h
+
+    page, y = new_page(True)
+    if not orders:
+        page.insert_text((margin, y + 22), "No orders in this period.", fontname="helv", fontsize=10, color=grey)
+    for i, o in enumerate(orders):
+        if y + row_h > height - margin - 16:
+            page, y = new_page(False)
+        if i % 2:
+            page.draw_rect(fitz.Rect(margin, y, width - margin, y + row_h), color=None, fill=stripe)
+        when = datetime.fromisoformat(o["created_at"]) + shift
+        values = [
+            str(i + 1),
+            when.strftime("%d %b %H:%M" if multi_day else "%H:%M"),
+            o.get("order_id") or "-",
+            o.get("product_name") or "-",
+            o.get("charm") or "-",
+            o.get("notes") or "",
+            f"+{o['customer_phone']}" if o.get("customer_phone") else "",
+        ]
+        x = margin
+        for (_, w), val in zip(cols, values):
+            page.insert_textbox(
+                fitz.Rect(x + 3, y + 3, x + w - 3, y + row_h - 1), truncate(val, 70), fontname="helv", fontsize=fs, color=INK
+            )
+            x += w
+        page.draw_line((margin, y + row_h), (width - margin, y + row_h), color=rule, width=0.5)
+        y += row_h
+    for n, pg in enumerate(doc):
+        pg.insert_text((width - margin - 60, height - 18), f"Page {n + 1} of {doc.page_count}", fontname="helv", fontsize=7, color=grey)
+    out = doc.tobytes(garbage=3, deflate=True)
+    doc.close()
+    return out
+
+
+@api.get("/orders/sheet.pdf")
+async def orders_sheet(start: str, end: str, tz: int = 0, title: str = ""):
+    """Order sheet PDF for orders created between `start` and `end` (ISO datetimes).
+    `tz` = minutes to add to UTC for printed times (the browser sends its own offset)."""
+    begin, finish = _parse_when(start, "start"), _parse_when(end, "end")
+    if finish <= begin or finish - begin > timedelta(days=93):
+        raise HTTPException(400, "Choose a period of up to 3 months.")
+    tz = max(-720, min(tz, 840))
+    rows = await db().fetch(
+        f"SELECT {ORDER_COLUMNS} FROM orders WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at ASC",
+        begin, finish,
+    )
+    orders = [row_dict(r) for r in rows]
+    shop = (SETTINGS.get("shop") or {}).get("shop_name") or "Charm.Studio"
+    period = title.strip()[:60] or (begin + timedelta(minutes=tz)).strftime("%d %b %Y")
+    pdf = build_order_sheet(orders, f"{shop} - order sheet", f"{period}  ·  {len(orders)} order{'s' if len(orders) != 1 else ''}", tz)
+    stamp = (begin + timedelta(minutes=tz)).strftime("%Y-%m-%d")
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="order_sheet_{stamp}.pdf"'})
 
 
 @api.post("/orders/bulk")
@@ -824,6 +926,8 @@ async def update_order(oid: str, patch: OrderPatch):
     changes = {k: (v.strip() if isinstance(v, str) else v) for k, v in patch.model_dump().items() if v is not None}
     if not changes:
         raise HTTPException(400, "No fields to update")
+    if "customer_phone" in changes:
+        changes["customer_phone"] = re.sub(r"\D", "", changes["customer_phone"])
     cols = list(changes.keys())  # keys come from the pydantic model, never from user input
     sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
     row = await db().fetchrow(
@@ -883,6 +987,9 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "").strip() or "claude-sonne
 OLLAMA_BASE_URL = (os.environ.get("OLLAMA_BASE_URL", "").strip() or "https://ollama.com").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "").strip()
 AI_MODEL = OLLAMA_MODEL if AI_PROVIDER == "ollama" else ANTHROPIC_MODEL
+# Models that support server-side refusal fallbacks ("fallbacks": "default"). Others (e.g. the cheaper
+# claude-haiku-5-5, a good fit for reading order details) are called without it.
+FALLBACK_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-2", "claude-fable-5-1"}
 
 _ai_client: Optional[AsyncAnthropic] = None
 
@@ -942,16 +1049,20 @@ async def claude_text(system: str, user: str, max_tokens: int = 16000, effort: O
         return _response_text(resp)
 
     # Sent via extra_body so the call works regardless of which SDK release exposes these as named params.
-    # "fallbacks": if the model declines, the API retries on a suitable fallback model server-side.
-    extra: Dict[str, Any] = {"fallbacks": "default"}
-    if effort:
+    extra: Dict[str, Any] = {}
+    betas: List[str] = []
+    if effort and not AI_MODEL.startswith("claude-haiku-4"):
         extra["output_config"] = {"effort": effort}
+    if AI_MODEL in FALLBACK_MODELS:
+        # If the model declines, the API retries on a suitable fallback model server-side.
+        extra["fallbacks"] = "default"
+        betas.append("server-side-fallback-2026-07-01")
     resp = await client.beta.messages.create(
         model=AI_MODEL,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
-        betas=["server-side-fallback-2026-07-01"],
+        betas=betas,
         extra_body=extra,
     )
     if resp.stop_reason == "refusal":
@@ -1315,14 +1426,129 @@ def next_step(fields: Dict[str, str]) -> int:
     return len(STEP_KEYS)
 
 
-async def send_wa(cfg: Dict[str, Any], to: str, text: str) -> httpx.Response:
-    url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{cfg['phone_id']}/messages"
-    body = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
+D360_BASE = (os.environ.get("D360_BASE_URL", "").strip() or "https://waba-v2.360dialog.io").rstrip("/")
+PROVIDERS = ("meta", "360dialog")
+BOT_MODES = ("ask", "read", "off")
+STATUS_ORDER = ["", "received", "sent", "delivered", "read", "failed"]
+
+
+async def wa_post(cfg: Dict[str, Any], path: str, payload: Dict[str, Any]) -> httpx.Response:
+    """POST to the number's provider. Meta Cloud API and 360dialog take the same message JSON."""
+    if cfg.get("provider") == "360dialog":
+        url, headers = f"{D360_BASE}/{path}", {"D360-API-KEY": cfg["token"] or ""}
+    else:
+        url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{cfg['phone_id']}/{path}"
+        headers = {"Authorization": f"Bearer {cfg['token']}"}
     async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(url, json=body, headers={"Authorization": f"Bearer {cfg['token']}"})
-    if resp.status_code >= 300:
+        return await client.post(url, json=payload, headers=headers)
+
+
+def _api_error(resp: httpx.Response) -> str:
+    try:
+        data = resp.json()
+    except ValueError:
+        return f"HTTP {resp.status_code}"
+    if isinstance(data, dict):
+        err = data.get("error") or (data.get("errors") or [{}])[0]
+        if isinstance(err, dict):
+            return str(err.get("message") or err.get("title") or err.get("details") or f"HTTP {resp.status_code}")
+    return f"HTTP {resp.status_code}"
+
+
+async def record_message(
+    label: str,
+    phone: str,
+    direction: str,
+    kind: str,
+    body: str,
+    wa_message_id: Optional[str],
+    status: str,
+    source: str,
+    error: str = "",
+    name: str = "",
+    at: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    """Store one message and update the Chats list. Returns None for a duplicate WhatsApp message id."""
+    at = at or now_utc()
+    row = await db().fetchrow(
+        "INSERT INTO wa_messages (id, number_label, customer_phone, direction, kind, body, wa_message_id, "
+        "status, source, error, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) "
+        "ON CONFLICT DO NOTHING RETURNING *",
+        str(uuid.uuid4()), label, phone, direction, kind, body[:4096], wa_message_id, status, source, error[:300], at,
+    )
+    if not row:
+        return None
+    preview = (("You: " if direction == "out" else "") + (body or f"[{kind}]")).replace("\n", " ")[:120]
+    await db().execute(
+        """
+        INSERT INTO wa_contacts (number_label, customer_phone, name, last_preview, last_message_at, last_inbound_at, unread)
+        VALUES ($1, $2, $3, $4, $5::timestamptz, CASE WHEN $6::boolean THEN $5::timestamptz END,
+                CASE WHEN $6::boolean THEN 1 ELSE 0 END)
+        ON CONFLICT (number_label, customer_phone) DO UPDATE SET
+            name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE wa_contacts.name END,
+            last_preview = CASE WHEN EXCLUDED.last_message_at >= wa_contacts.last_message_at
+                                THEN EXCLUDED.last_preview ELSE wa_contacts.last_preview END,
+            last_message_at = GREATEST(wa_contacts.last_message_at, EXCLUDED.last_message_at),
+            last_inbound_at = CASE WHEN $6::boolean
+                                   THEN GREATEST(COALESCE(wa_contacts.last_inbound_at, EXCLUDED.last_message_at),
+                                                 EXCLUDED.last_message_at)
+                                   ELSE wa_contacts.last_inbound_at END,
+            unread = CASE WHEN $6::boolean THEN wa_contacts.unread + 1 ELSE wa_contacts.unread END
+        """,
+        label, phone, name, preview, at, direction == "in",
+    )
+    return row_dict(row)
+
+
+async def send_wa(cfg: Dict[str, Any], to: str, text: str, source: str = "bot") -> httpx.Response:
+    body = {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, "type": "text", "text": {"body": text}}
+    resp = await wa_post(cfg, "messages", body)
+    wamid, error = None, ""
+    if resp.status_code < 300:
+        try:
+            wamid = ((resp.json().get("messages") or [{}])[0]).get("id")
+        except (ValueError, AttributeError):
+            wamid = None
+    else:
+        error = _api_error(resp)
         log.warning("WhatsApp send failed (%s): %s", resp.status_code, resp.text[:500])
+    try:
+        await record_message(cfg["logical_id"], to, "out", "text", text, wamid, "sent" if resp.status_code < 300 else "failed", source, error)
+    except Exception:  # noqa: BLE001
+        log.exception("Could not record outgoing message")
     return resp
+
+
+def message_content(msg: Dict[str, Any]) -> tuple:
+    """(kind, readable text) for any incoming/echoed WhatsApp message."""
+    t = msg.get("type") or "other"
+    if t == "text":
+        return "text", (msg.get("text") or {}).get("body", "")
+    if t in ("image", "video", "document", "audio", "sticker"):
+        media = msg.get(t) or {}
+        return t, media.get("caption") or media.get("filename") or ""
+    if t == "button":
+        return "text", (msg.get("button") or {}).get("text", "")
+    if t == "interactive":
+        i = msg.get("interactive") or {}
+        reply = i.get("button_reply") or i.get("list_reply") or {}
+        return "text", reply.get("title", "")
+    if t == "location":
+        loc = msg.get("location") or {}
+        return "location", " ".join(str(x) for x in (loc.get("name"), loc.get("address"), loc.get("latitude"), loc.get("longitude")) if x)
+    if t == "reaction":
+        return "reaction", (msg.get("reaction") or {}).get("emoji", "")
+    if t == "contacts":
+        names = [((c.get("name") or {}).get("formatted_name") or "") for c in msg.get("contacts") or []]
+        return "contacts", ", ".join(n for n in names if n)
+    return t, ""
+
+
+def _msg_time(msg: Dict[str, Any]) -> datetime:
+    try:
+        return datetime.fromtimestamp(int(msg.get("timestamp")), timezone.utc)
+    except (TypeError, ValueError):
+        return now_utc()
 
 
 async def ai_extract_message(text: str) -> Dict[str, str]:
@@ -1413,31 +1639,170 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     await send_wa(cfg, customer, bot_question(step))
 
 
-async def process_webhook(body: Dict[str, Any]):
-    try:
-        for entry in body.get("entry", []) or []:
+CHAT_EXTRACT_SYSTEM = (
+    "You read WhatsApp messages that one customer sent to a shop selling customised charms. "
+    "Return ONLY a JSON array with one object per distinct order, keys order_id (the marketplace order or "
+    "sub-order ID exactly as written), product_name (the name to print on the product), charm, notes. "
+    "Use empty strings for unknown fields. If there are no order details, return []. No prose."
+)
+READ_DEBOUNCE_S = float(os.environ.get("READ_DEBOUNCE_SECONDS", "20"))
+_read_pending: Dict[tuple, float] = {}
+_background: set = set()
+
+
+def ai_ready() -> bool:
+    if AI_PROVIDER == "ollama":
+        return bool(OLLAMA_MODEL) and (bool(os.environ.get("OLLAMA_API_KEY", "").strip()) or "ollama.com" not in OLLAMA_BASE_URL)
+    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+
+
+async def save_extracted_order(label: str, customer: str, row: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Create the order, or fill blank fields of an existing one with the same order ID (never overwrite)."""
+    if not row.get("order_id"):
+        return None
+    existing = await db().fetchrow(
+        f"SELECT {ORDER_COLUMNS} FROM orders "
+        "WHERE upper(regexp_replace(order_id, '[^A-Za-z0-9]', '', 'g')) = $1 AND customer_phone IN ($2, '') "
+        "ORDER BY (customer_phone = $2) DESC, created_at DESC LIMIT 1",
+        norm_id(row["order_id"]),
+        customer,
+    )
+    if not existing:
+        return await insert_order(
+            {**row, "source": "whatsapp", "channel": label, "customer_phone": customer}
+        )
+    changes = {f: row[f] for f in ("product_name", "charm", "notes") if row.get(f) and not existing[f]}
+    if not existing["customer_phone"]:
+        changes["customer_phone"] = customer
+    if not changes:
+        return row_dict(existing)
+    cols = list(changes)
+    sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
+    updated = await db().fetchrow(
+        f"UPDATE orders SET {sets} WHERE id = $1 RETURNING {ORDER_COLUMNS}", existing["id"], *[changes[c] for c in cols]
+    )
+    return row_dict(updated)
+
+
+async def read_order_details(label: str, customer: str) -> Dict[str, Any]:
+    """Read the customer's recent messages and save any orders found (AI if configured, else order-ID patterns)."""
+    rows = await db().fetch(
+        "SELECT body FROM wa_messages WHERE number_label = $1 AND customer_phone = $2 AND direction = 'in' "
+        "AND body <> '' AND created_at > now() - interval '3 days' ORDER BY created_at DESC LIMIT 20",
+        label,
+        customer,
+    )
+    transcript = "\n".join(r["body"] for r in reversed(rows))
+    if not transcript.strip():
+        return {"orders": [], "used_ai": False}
+    found: List[Dict[str, str]] = []
+    used_ai = False
+    if ai_ready():
+        try:
+            found = parse_orders(await claude_text(CHAT_EXTRACT_SYSTEM, transcript, max_tokens=2000, effort="low"))
+            used_ai = True
+        except Exception:  # noqa: BLE001
+            log.exception("AI order reading failed; falling back to order-ID patterns")
+    for oid in detect_ids(transcript):  # catch IDs the AI missed (or when no AI is configured)
+        if not any(r.get("order_id") and ids_match(oid, r["order_id"]) for r in found):
+            found.append({"order_id": oid, "product_name": "", "charm": "", "notes": ""})
+    saved = [o for o in [await save_extracted_order(label, customer, r) for r in found] if o]
+    return {"orders": saved, "used_ai": used_ai}
+
+
+def schedule_read(label: str, customer: str) -> None:
+    """Read order details after a short quiet period, so a burst of messages triggers one read."""
+    key, stamp = (label, customer), time.monotonic()
+    _read_pending[key] = stamp
+
+    async def run():
+        await asyncio.sleep(READ_DEBOUNCE_S)
+        if _read_pending.get(key) != stamp:
+            return  # a newer message arrived; its own task will read
+        _read_pending.pop(key, None)
+        try:
+            await read_order_details(label, customer)
+        except Exception:  # noqa: BLE001
+            log.exception("Reading order details failed for %s", customer)
+
+    task = asyncio.create_task(run())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
+    """Handle one webhook 'value' (Meta Cloud API format): messages, coexistence echoes, statuses."""
+    label = cfg["logical_id"]
+    names = {c.get("wa_id"): ((c.get("profile") or {}).get("name") or "") for c in value.get("contacts") or []}
+    for msg in value.get("messages") or []:
+        if not msg.get("id"):
+            continue
+        fresh = await db().fetchval(
+            "INSERT INTO wa_events (message_id, received_at) VALUES ($1, now()) "
+            "ON CONFLICT (message_id) DO NOTHING RETURNING message_id",
+            msg["id"],
+        )
+        if not fresh:
+            continue  # duplicate delivery
+        customer = msg.get("from", "")
+        kind, text = message_content(msg)
+        await record_message(label, customer, "in", kind, text, msg["id"], "received", "customer",
+                             name=names.get(customer, ""), at=_msg_time(msg))
+        if kind != "text" or not text.strip():
+            continue
+        mode = cfg.get("bot_mode") or "ask"
+        try:
+            if mode == "ask":
+                await handle_bot_message(cfg, customer, text)
+            elif mode == "read":
+                schedule_read(label, customer)
+        except Exception:  # noqa: BLE001
+            log.exception("Bot failed for message %s", msg["id"])
+    for echo in value.get("message_echoes") or []:  # coexistence: sent from the WhatsApp Business app
+        kind, text = message_content(echo)
+        await record_message(label, echo.get("to", ""), "out", kind, text, echo.get("id"), "sent", "phone_app",
+                             at=_msg_time(echo))
+    for st in value.get("statuses") or []:
+        status = st.get("status") or ""
+        if status not in STATUS_ORDER or not st.get("id"):
+            continue
+        err = (st.get("errors") or [{}])[0]
+        await db().execute(
+            "UPDATE wa_messages SET status = $2, error = CASE WHEN $3 <> '' THEN $3 ELSE error END "
+            "WHERE wa_message_id = $1 AND array_position($4::text[], status) < array_position($4::text[], $2)",
+            st["id"], status, str(err.get("message") or err.get("title") or "")[:300], STATUS_ORDER,
+        )
+
+
+def webhook_values(body: Dict[str, Any]):
+    """Yield (field, value) from a Meta-style payload, or treat a flat payload as one value."""
+    if isinstance(body.get("entry"), list):
+        for entry in body["entry"]:
             for change in entry.get("changes", []) or []:
-                value = change.get("value", {}) or {}
-                phone_id = (value.get("metadata") or {}).get("phone_number_id")
-                cfg = WA_NUMBERS.get(str(phone_id)) if phone_id else None
-                if not cfg:
-                    continue  # unknown or paused number: ignore
-                for msg in value.get("messages", []) or []:
-                    if msg.get("type") != "text" or not msg.get("id"):
-                        continue
-                    fresh = await db().fetchval(
-                        "INSERT INTO wa_events (message_id, received_at) VALUES ($1, now()) "
-                        "ON CONFLICT (message_id) DO NOTHING RETURNING message_id",
-                        msg["id"],
-                    )
-                    if not fresh:
-                        continue  # duplicate delivery from Meta
-                    try:
-                        await handle_bot_message(cfg, msg.get("from", ""), (msg.get("text") or {}).get("body", ""))
-                    except Exception:  # noqa: BLE001
-                        log.exception("Bot failed for message %s", msg["id"])
+                yield change.get("field", "messages"), change.get("value", {}) or {}
+    elif any(k in body for k in ("messages", "statuses", "message_echoes", "contacts")):
+        yield "messages", body
+
+
+async def process_webhook(body: Dict[str, Any]):
+    """Meta Cloud API webhook: route each value by its phone_number_id."""
+    try:
+        for _field, value in webhook_values(body):
+            phone_id = (value.get("metadata") or {}).get("phone_number_id")
+            cfg = WA_NUMBERS.get(str(phone_id)) if phone_id else None
+            if cfg:  # unknown or paused numbers are ignored
+                await process_value(cfg, value)
     except Exception:  # noqa: BLE001
         log.exception("Webhook processing failed")
+
+
+async def process_number_webhook(cfg: Dict[str, Any], body: Dict[str, Any]):
+    """Per-number webhook (360dialog): the URL already identifies the number."""
+    try:
+        for _field, value in webhook_values(body):
+            await process_value(cfg, value)
+    except Exception:  # noqa: BLE001
+        log.exception("Webhook processing failed for %s", cfg.get("label"))
 
 
 def all_verify_tokens() -> set:
@@ -1466,6 +1831,22 @@ async def wa_webhook(request: Request, background: BackgroundTasks):
     return {"status": "received"}
 
 
+@public.post("/wa/webhook/n/{number_id}/{key}")
+async def wa_number_webhook(number_id: str, key: str, request: Request, background: BackgroundTasks):
+    """Webhook for numbers connected through a provider such as 360dialog. The secret key in the
+    address proves the request comes from the provider we gave it to (360dialog doesn't sign webhooks)."""
+    cfg = next((c for c in WA_ALL if c["id"] == number_id), None)
+    if not cfg or not cfg.get("webhook_key") or not hmac.compare_digest(key, cfg["webhook_key"]):
+        return PlainTextResponse("Not found", status_code=404)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if isinstance(body, dict) and cfg["active"] and cfg["token"]:
+        background.add_task(process_number_webhook, cfg, body)
+    return {"status": "received"}
+
+
 def public_base_url(request: Request) -> str:
     override = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
     if override:
@@ -1481,9 +1862,9 @@ async def wa_status(request: Request):
         active = await conn.fetchval("SELECT count(*) FROM wa_conversations")
         wa_orders = await conn.fetchval("SELECT count(*) FROM orders WHERE source = 'whatsapp'")
     return {
-        "configured": bool(WA_NUMBERS),
+        "configured": bool(active_numbers()),
         "verify_token_set": bool(all_verify_tokens()),
-        "numbers_count": len(WA_NUMBERS),
+        "numbers_count": len(active_numbers()),
         "numbers_saved": len(WA_ALL),
         "callback_url": f"{public_base_url(request)}/api/wa/webhook",
         "active_conversations": active,
@@ -1503,14 +1884,14 @@ async def wa_conversations():
 
 @api.post("/wa/test-send")
 async def wa_test_send(payload: TestSendIn):
-    cfg = next((c for c in WA_NUMBERS.values() if c["logical_id"] == payload.logical_id), None)
+    cfg = next((c for c in active_numbers() if c["logical_id"] == payload.logical_id), None)
     if not cfg:
         raise HTTPException(404, f"'{payload.logical_id}' isn't an active WhatsApp number.")
     to = re.sub(r"[^\d]", "", payload.to)
     if not to or not payload.text.strip():
         raise HTTPException(400, "Recipient and text are required")
     try:
-        resp = await send_wa(cfg, to, payload.text)
+        resp = await send_wa(cfg, to, payload.text, source="staff")
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Could not reach WhatsApp API: {e}")
     try:
@@ -1532,10 +1913,12 @@ META_CHECK_FAILED = 424  # tells the frontend it may offer "Save anyway"
 
 class WaNumberIn(BaseModel):
     label: str
-    phone_id: str
-    token: str
+    provider: Literal["meta", "360dialog"] = "meta"
+    phone_id: str  # Meta: Phone Number ID. 360dialog: the WhatsApp number with country code.
+    token: str  # Meta: access token. 360dialog: API key.
     display: str = ""
     verify_token: str = ""
+    bot_mode: Optional[Literal["ask", "read", "off"]] = None
     skip_check: bool = False
 
 
@@ -1546,16 +1929,24 @@ class WaNumberPatch(BaseModel):
     display: Optional[str] = None
     verify_token: Optional[str] = None  # None keeps, "" clears
     active: Optional[bool] = None
+    bot_mode: Optional[Literal["ask", "read", "off"]] = None
     skip_check: bool = False
 
 
-def wa_public(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def number_webhook_url(base: str, cfg: Dict[str, Any]) -> str:
+    return f"{base}/api/wa/webhook/n/{cfg['id']}/{cfg['webhook_key']}" if cfg.get("webhook_key") else ""
+
+
+def wa_public(cfg: Dict[str, Any], base: str = "") -> Dict[str, Any]:
     return {
         "id": cfg["id"],
         "label": cfg["label"],
         "logical_id": cfg["logical_id"],
         "display": cfg["display"],
         "phone_id": cfg["phone_id"],
+        "provider": cfg.get("provider", "meta"),
+        "bot_mode": cfg.get("bot_mode", "ask"),
+        "webhook_url": number_webhook_url(base, cfg) if base and cfg.get("provider") == "360dialog" else "",
         "token_hint": f"••••{cfg['token_last4']}" if cfg.get("token_last4") else "",
         "token_ok": cfg["token"] is not None,
         "active": cfg["active"],
@@ -1571,17 +1962,23 @@ def clean_label(label: str) -> str:
     return label
 
 
-def clean_phone_id(phone_id: str) -> str:
+def clean_phone_id(phone_id: str, provider: str = "meta") -> str:
+    if provider == "360dialog":
+        digits = re.sub(r"\D", "", phone_id or "")
+        if not 8 <= len(digits) <= 15:
+            raise HTTPException(400, "Enter the WhatsApp number with country code, e.g. 918339039324.")
+        return digits
     phone_id = (phone_id or "").strip()
     if not re.fullmatch(r"\d{5,30}", phone_id):
         raise HTTPException(400, "Phone Number ID should be the long number from Meta's API Setup page (digits only).")
     return phone_id
 
 
-def clean_wa_token(token: str) -> str:
+def clean_wa_token(token: str, provider: str = "meta") -> str:
     token = (token or "").strip()
     if len(token) < 20 or " " in token:
-        raise HTTPException(400, "That access token looks incomplete. Copy the whole token from Meta.")
+        what = "360dialog API key" if provider == "360dialog" else "access token"
+        raise HTTPException(400, f"That {what} looks incomplete. Copy the whole value.")
     return token
 
 
@@ -1604,6 +2001,17 @@ async def meta_check(phone_id: str, token: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+async def d360_set_webhook(api_key: str, url: str) -> None:
+    """Point the 360dialog number's webhook at Charm.Studio. Raises HTTPException(424) on failure."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(f"{D360_BASE}/v1/configs/webhook", json={"url": url}, headers={"D360-API-KEY": api_key})
+    except httpx.HTTPError:
+        raise HTTPException(META_CHECK_FAILED, "Couldn't reach 360dialog to set the webhook. Try again, or save anyway.")
+    if resp.status_code >= 300:
+        raise HTTPException(META_CHECK_FAILED, f"360dialog rejected the API key or webhook: {_api_error(resp)}")
+
+
 def find_number(number_id: str) -> Dict[str, Any]:
     cfg = next((c for c in WA_ALL if c["id"] == number_id), None)
     if not cfg:
@@ -1618,57 +2026,67 @@ def ensure_unique(label: Optional[str] = None, phone_id: Optional[str] = None, e
         if label and c["label"].casefold() == label.casefold():
             raise HTTPException(409, f"You already have a number called '{c['label']}'.")
         if phone_id and c["phone_id"] == phone_id:
-            raise HTTPException(409, f"This Phone Number ID is already saved as '{c['label']}'.")
+            raise HTTPException(409, f"This number is already saved as '{c['label']}'.")
 
 
 @api.get("/wa/numbers")
-async def list_wa_numbers():
-    return [wa_public(c) for c in WA_ALL]
+async def list_wa_numbers(request: Request):
+    base = public_base_url(request)
+    return [wa_public(c, base) for c in WA_ALL]
 
 
 @api.post("/wa/numbers", status_code=201)
-async def add_wa_number(payload: WaNumberIn):
+async def add_wa_number(payload: WaNumberIn, request: Request):
     if not AUTH_SECRET:
         raise HTTPException(503, "Set AUTH_SECRET on the server before saving WhatsApp numbers.")
-    label, phone_id, token = clean_label(payload.label), clean_phone_id(payload.phone_id), clean_wa_token(payload.token)
+    provider = payload.provider
+    label = clean_label(payload.label)
+    phone_id = clean_phone_id(payload.phone_id, provider)
+    token = clean_wa_token(payload.token, provider)
     ensure_unique(label, phone_id)
     display = " ".join(payload.display.split())[:40]
-    if not payload.skip_check:
+    number_id = str(uuid.uuid4())
+    webhook_key = secrets.token_urlsafe(24) if provider == "360dialog" else ""
+    bot_mode = payload.bot_mode or ("read" if provider == "360dialog" else "ask")
+    if provider == "360dialog":
+        display = display or f"+{phone_id}"
+        if not payload.skip_check:
+            url = number_webhook_url(public_base_url(request), {"id": number_id, "webhook_key": webhook_key})
+            await d360_set_webhook(token, url)
+    elif not payload.skip_check:
         info = await meta_check(phone_id, token)
         display = display or info.get("display_phone_number", "")
-    number_id = str(uuid.uuid4())
     verify = payload.verify_token.strip()
     await db().execute(
-        "INSERT INTO wa_numbers (id, label, display, phone_id, token_enc, token_last4, verify_token_enc) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        number_id,
-        label,
-        display,
-        phone_id,
-        secret_box.encrypt(token),
-        token[-4:],
-        secret_box.encrypt(verify) if verify else "",
+        "INSERT INTO wa_numbers (id, label, display, phone_id, token_enc, token_last4, verify_token_enc, "
+        "provider, bot_mode, webhook_key) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        number_id, label, display, phone_id, secret_box.encrypt(token), token[-4:],
+        secret_box.encrypt(verify) if verify else "", provider, bot_mode, webhook_key,
     )
     await load_wa_numbers()
-    return wa_public(find_number(number_id))
+    return wa_public(find_number(number_id), public_base_url(request))
 
 
 @api.patch("/wa/numbers/{number_id}")
-async def update_wa_number(number_id: str, payload: WaNumberPatch):
+async def update_wa_number(number_id: str, payload: WaNumberPatch, request: Request):
     cfg = find_number(number_id)
+    provider = cfg.get("provider", "meta")
     changes: Dict[str, Any] = {}
     label = clean_label(payload.label) if payload.label is not None else None
-    phone_id = clean_phone_id(payload.phone_id) if payload.phone_id is not None else None
-    token = clean_wa_token(payload.token) if payload.token else None
+    phone_id = clean_phone_id(payload.phone_id, provider) if payload.phone_id is not None else None
+    token = clean_wa_token(payload.token, provider) if payload.token else None
     ensure_unique(
         label if label and label != cfg["label"] else None,
         phone_id if phone_id and phone_id != cfg["phone_id"] else None,
         exclude=number_id,
     )
-    if (token or (phone_id and phone_id != cfg["phone_id"])) and not payload.skip_check:
-        check_token = token or cfg["token"]
-        if check_token:
-            await meta_check(phone_id or cfg["phone_id"], check_token)
+    if not payload.skip_check:
+        if provider == "360dialog" and token:
+            await d360_set_webhook(token, number_webhook_url(public_base_url(request), cfg))
+        elif provider == "meta" and (token or (phone_id and phone_id != cfg["phone_id"])):
+            check_token = token or cfg["token"]
+            if check_token:
+                await meta_check(phone_id or cfg["phone_id"], check_token)
     if label is not None:
         changes["label"] = label
     if phone_id is not None:
@@ -1683,6 +2101,8 @@ async def update_wa_number(number_id: str, payload: WaNumberPatch):
         changes["verify_token_enc"] = secret_box.encrypt(v) if v else ""
     if payload.active is not None:
         changes["active"] = payload.active
+    if payload.bot_mode is not None:
+        changes["bot_mode"] = payload.bot_mode
     if changes:
         cols = list(changes)  # fixed names from this function
         sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
@@ -1694,14 +2114,12 @@ async def update_wa_number(number_id: str, payload: WaNumberPatch):
                     *[changes[c] for c in cols],
                 )
                 if label and label != cfg["label"]:
-                    # keep in-progress bot chats attached to the renamed number
-                    await conn.execute(
-                        "UPDATE wa_conversations SET business_number_id = $1 WHERE business_number_id = $2",
-                        label,
-                        cfg["label"],
-                    )
+                    # keep chats, messages and in-progress bot conversations attached to the renamed number
+                    for table, col in (("wa_conversations", "business_number_id"), ("wa_messages", "number_label"),
+                                       ("wa_contacts", "number_label")):
+                        await conn.execute(f"UPDATE {table} SET {col} = $1 WHERE {col} = $2", label, cfg["label"])
         await load_wa_numbers()
-    return wa_public(find_number(number_id))
+    return wa_public(find_number(number_id), public_base_url(request))
 
 
 @api.delete("/wa/numbers/{number_id}")
@@ -1711,15 +2129,20 @@ async def delete_wa_number(number_id: str):
         async with conn.transaction():
             await conn.execute("DELETE FROM wa_numbers WHERE id = $1", number_id)
             await conn.execute("DELETE FROM wa_conversations WHERE business_number_id = $1", cfg["label"])
-    await load_wa_numbers()
+    await load_wa_numbers()  # chat history (wa_messages) is kept
     return {"deleted": 1}
 
 
 @api.post("/wa/numbers/{number_id}/check")
-async def check_wa_number(number_id: str):
+async def check_wa_number(number_id: str, request: Request):
     cfg = find_number(number_id)
     if cfg["token"] is None:
-        raise HTTPException(400, "The saved token can't be read any more. Edit the number and paste the token again.")
+        raise HTTPException(400, "The saved token can't be read any more. Edit the number and paste it again.")
+    if cfg.get("provider") == "360dialog":
+        url = number_webhook_url(public_base_url(request), cfg)
+        await d360_set_webhook(cfg["token"], url)  # (re)points the webhook at Charm.Studio
+        return {"ok": True, "display_phone_number": cfg["display"], "verified_name": "", "quality_rating": "",
+                "message": "360dialog accepted the API key and now sends this number's messages to Charm.Studio."}
     info = await meta_check(cfg["phone_id"], cfg["token"])
     if not cfg["display"] and info.get("display_phone_number"):
         await db().execute(
@@ -1734,6 +2157,137 @@ async def check_wa_number(number_id: str):
         "verified_name": info.get("verified_name", ""),
         "quality_rating": info.get("quality_rating", ""),
     }
+
+
+# ---------------------------------------------------------------------------
+# Chats (team inbox): search customers, read the thread and their orders, reply
+# ---------------------------------------------------------------------------
+REPLY_WINDOW = 24 * 3600  # WhatsApp only allows free-form replies within 24h of the customer's last message
+
+
+class InboxSendIn(BaseModel):
+    number_label: str
+    to: str
+    text: str = Field(..., min_length=1, max_length=4096)
+
+
+def conversation_public(r: asyncpg.Record) -> Dict[str, Any]:
+    d = row_dict(r)
+    last_in = r["last_inbound_at"]
+    closes = last_in.timestamp() + REPLY_WINDOW if last_in else None
+    d["window_open"] = bool(closes and closes > time.time())
+    d["window_closes_at"] = datetime.fromtimestamp(closes, timezone.utc).isoformat() if closes else None
+    return d
+
+
+@api.get("/inbox/conversations")
+async def inbox_conversations(q: Optional[str] = None, number: Optional[str] = None, limit: int = 60):
+    conds: List[str] = []
+    args: List[Any] = []
+    if number:
+        args.append(number)
+        conds.append(f"c.number_label = ${len(args)}")
+    if q and q.strip():
+        query = q.strip()
+        args.append("%" + re.sub(r"([\\%_])", r"\\\1", query) + "%")
+        i = len(args)
+        cond = (
+            f"(c.name ILIKE ${i} OR c.last_preview ILIKE ${i} OR c.customer_phone ILIKE ${i}"
+            f" OR EXISTS (SELECT 1 FROM orders o WHERE o.customer_phone = c.customer_phone AND c.customer_phone <> ''"
+            f"   AND (o.order_id ILIKE ${i} OR o.product_name ILIKE ${i} OR o.charm ILIKE ${i}))"
+            f" OR EXISTS (SELECT 1 FROM wa_messages m WHERE m.number_label = c.number_label"
+            f"   AND m.customer_phone = c.customer_phone AND m.body ILIKE ${i})"
+        )
+        digits = re.sub(r"\D", "", query)
+        if len(digits) >= 4:
+            args.append(f"%{digits}%")
+            cond += f" OR c.customer_phone LIKE ${len(args)}"
+        conds.append(cond + ")")
+    args.append(max(1, min(limit, 200)))
+    rows = await db().fetch(
+        f"""SELECT c.*, (SELECT count(*) FROM orders o WHERE o.customer_phone = c.customer_phone
+                          AND c.customer_phone <> '') AS order_count
+            FROM wa_contacts c {"WHERE " + " AND ".join(conds) if conds else ""}
+            ORDER BY c.last_message_at DESC LIMIT ${len(args)}""",
+        *args,
+    )
+    return [conversation_public(r) for r in rows]
+
+
+@api.get("/inbox/unread")
+async def inbox_unread():
+    return {"unread": int(await db().fetchval("SELECT COALESCE(sum(unread), 0) FROM wa_contacts") or 0)}
+
+
+async def _thread(label: str, phone: str) -> Dict[str, Any]:
+    contact = await db().fetchrow(
+        "SELECT c.*, 0 AS order_count FROM wa_contacts c WHERE number_label = $1 AND customer_phone = $2", label, phone
+    )
+    if not contact:
+        raise HTTPException(404, "No chat with this customer on that number yet.")
+    messages = await db().fetch(
+        "SELECT * FROM (SELECT * FROM wa_messages WHERE number_label = $1 AND customer_phone = $2 "
+        "ORDER BY created_at DESC LIMIT 300) t ORDER BY created_at ASC",
+        label, phone,
+    )
+    orders = await db().fetch(
+        f"SELECT {ORDER_COLUMNS} FROM orders WHERE customer_phone = $1 ORDER BY created_at DESC LIMIT 50", phone
+    )
+    cfg = next((c for c in WA_ALL if c["logical_id"] == label), None)
+    return {
+        "contact": conversation_public(contact),
+        "messages": [row_dict(m) for m in messages],
+        "orders": [row_dict(o) for o in orders],
+        "number": {
+            "label": label,
+            "exists": bool(cfg),
+            "can_send": bool(cfg and cfg["active"] and cfg["token"]),
+            "bot_mode": cfg.get("bot_mode") if cfg else None,
+            "provider": cfg.get("provider") if cfg else None,
+        },
+    }
+
+
+@api.get("/inbox/conversations/{label}/{phone}")
+async def inbox_thread(label: str, phone: str):
+    data = await _thread(label, phone)
+    await db().execute("UPDATE wa_contacts SET unread = 0 WHERE number_label = $1 AND customer_phone = $2", label, phone)
+    data["contact"]["unread"] = 0
+    return data
+
+
+@api.post("/inbox/conversations/{label}/{phone}/read-orders")
+async def inbox_read_orders(label: str, phone: str):
+    """Read the customer's recent messages again and save any order details found."""
+    await _thread(label, phone)  # 404 if unknown
+    result = await read_order_details(label, phone)
+    return {**result, "ai_ready": ai_ready()}
+
+
+@api.post("/inbox/send")
+async def inbox_send(payload: InboxSendIn):
+    cfg = next((c for c in WA_ALL if c["logical_id"] == payload.number_label), None)
+    if not cfg or not cfg["active"] or not cfg["token"]:
+        raise HTTPException(400, f"'{payload.number_label}' isn't an active WhatsApp number in Settings.")
+    to = re.sub(r"\D", "", payload.to)
+    if not 8 <= len(to) <= 15:
+        raise HTTPException(400, "Enter the customer's number with country code, e.g. 919876543210.")
+    last_in = await db().fetchval(
+        "SELECT last_inbound_at FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", cfg["logical_id"], to
+    )
+    if not last_in or last_in.timestamp() + REPLY_WINDOW < time.time():
+        raise HTTPException(
+            409,
+            "WhatsApp only allows typed replies within 24 hours of the customer's last message. "
+            "This customer hasn't messaged in the last 24 hours, so they need to message you first.",
+        )
+    try:
+        resp = await send_wa(cfg, to, payload.text.strip(), source="staff")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Could not reach WhatsApp: {e}")
+    if resp.status_code >= 300:
+        raise HTTPException(502, f"WhatsApp didn't accept the message: {_api_error(resp)}")
+    return await _thread(cfg["logical_id"], to)
 
 
 # ---------------------------------------------------------------------------
@@ -1785,12 +2339,8 @@ async def save_label_settings(payload: LabelSettingsIn):
 
 @api.get("/system/status")
 async def system_status(request: Request):
-    if AI_PROVIDER == "ollama":
-        ai_ready = bool(OLLAMA_MODEL) and (bool(os.environ.get("OLLAMA_API_KEY", "").strip()) or "ollama.com" not in OLLAMA_BASE_URL)
-    else:
-        ai_ready = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
     return {
-        "ai": {"provider": AI_PROVIDER, "model": AI_MODEL or "", "ready": ai_ready},
+        "ai": {"provider": AI_PROVIDER, "model": AI_MODEL or "", "ready": ai_ready()},
         "email_reset": {
             "configured": bool(RESEND_API_KEY),
             "sender": RESEND_FROM,
@@ -1802,7 +2352,7 @@ async def system_status(request: Request):
             "verify_token_set": bool(all_verify_tokens()),
             "callback_url": f"{public_base_url(request)}/api/wa/webhook",
             "saved": len(WA_ALL),
-            "active": len(WA_NUMBERS),
+            "active": len(active_numbers()),
             "unreadable_tokens": sum(1 for c in WA_ALL if c["token"] is None),
         },
     }

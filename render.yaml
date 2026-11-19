@@ -31,6 +31,8 @@ services:
         value: anthropic # or: ollama
       - key: ANTHROPIC_API_KEY
         sync: false # needed when AI_PROVIDER=anthropic
+      - key: ANTHROPIC_MODEL
+        value: claude-haiku-5-5 # cheapest for reading chats; remove to use the default Sonnet
       - key: OLLAMA_API_KEY
         sync: false # needed when AI_PROVIDER=ollama (Ollama Cloud)
       - key: OLLAMA_MODEL
