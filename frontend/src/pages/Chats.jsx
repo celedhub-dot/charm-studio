@@ -148,7 +148,7 @@ function StatusTick({ m }) {
   return <Check size={13} className="text-muted" />;
 }
 
-function MessageList({ messages }) {
+function MessageList({ messages, namePrefix }) {
   const endRef = useRef(null);
   const lastId = messages.length ? messages[messages.length - 1].id : null;
   useEffect(() => {
@@ -186,7 +186,7 @@ function MessageList({ messages }) {
                 )}
                 {m.media_id ? (
                   <div className={m.body && m.body !== m.media_name ? "mb-1" : ""}>
-                    <MessageMedia m={m} />
+                    <MessageMedia m={m} namePrefix={namePrefix} />
                   </div>
                 ) : (
                   !["text", "template"].includes(m.kind) && <div className="mb-0.5 text-[11px] font-medium uppercase text-muted">[{m.kind}]</div>
@@ -467,7 +467,7 @@ function Thread({ sel, onBack, onSent }) {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto bg-[#EFEAE1]">
-          <MessageList messages={messages} />
+          <MessageList messages={messages} namePrefix={thread.orders[0]?.order_id || ""} />
         </div>
 
         <form onSubmit={send} className="border-t border-line bg-white p-3" data-testid="reply-form">

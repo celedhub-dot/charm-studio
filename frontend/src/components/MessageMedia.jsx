@@ -76,12 +76,67 @@ function Failed({ error, onRetry }) {
   );
 }
 
+const EXT = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/3gpp": "3gp",
+  "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/aac": "aac", "audio/amr": "amr", "application/pdf": "pdf",
+};
+
+// e.g. "123456789012_1 - 2026-11-19 1705.jpg", so saved files are easy to find by order
+function downloadName(m, prefix) {
+  if (m.media_name) return m.media_name;
+  const d = new Date(m.created_at);
+  const pad = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}${pad(d.getMinutes())}`;
+  const ext = EXT[m.media_mime] || (m.media_mime || "").split("/").pop() || "bin";
+  const who = (prefix || m.customer_phone || "whatsapp").replace(/[\\/:*?"<>|]/g, "_");
+  return `${who} - ${stamp}.${ext}`;
+}
+
+function saveAs(url, filename) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function DownloadButton({ onClick, busy, className = "", testId }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onClick();
+      }}
+      className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ${className}`}
+      title="Download to this computer"
+      aria-label="Download"
+      data-testid={testId}
+    >
+      {busy ? <Spinner className="h-3 w-3" /> : <DownloadSimple size={14} />} Download
+    </button>
+  );
+}
+
 /** Shows the photo / sticker / voice note / video / file attached to a chat message. */
-export default function MessageMedia({ m }) {
+export default function MessageMedia({ m, namePrefix = "" }) {
   const kind = m.kind;
   const auto = kind === "image" || kind === "sticker" || kind === "audio"; // small enough to load right away
   const { url, error, loading, load } = useMediaUrl(m.id, auto);
   const name = m.media_name || (kind === "document" ? "File" : "");
+  const [saving, setSaving] = useState(false);
+  const download = async () => {
+    setSaving(true);
+    try {
+      saveAs(url || (await loadUrl(m.id)), downloadName(m, namePrefix));
+    } catch (e) {
+      load(); // shows the reason (e.g. expired) in place of the file
+    } finally {
+      setSaving(false);
+    }
+  };
 
   if (error && !url) return <Failed error={error} onRetry={error.includes("30 days") || error.includes("isn't in Settings") ? null : load} />;
 
@@ -93,51 +148,56 @@ export default function MessageMedia({ m }) {
         </div>
       );
     return (
-      <a href={url} target="_blank" rel="noreferrer" title="Open full size" data-testid={`media-image-${m.id}`}>
-        <img
-          src={url}
-          alt={m.body || (kind === "sticker" ? "Sticker" : "Photo")}
-          className={kind === "sticker" ? "h-28 w-28 object-contain" : "max-h-72 w-auto max-w-full rounded-lg object-cover"}
+      <div className="group relative inline-block max-w-full">
+        <a href={url} target="_blank" rel="noreferrer" title="Open full size" data-testid={`media-image-${m.id}`}>
+          <img
+            src={url}
+            alt={m.body || (kind === "sticker" ? "Sticker" : "Photo")}
+            className={kind === "sticker" ? "h-28 w-28 object-contain" : "max-h-72 w-auto max-w-full rounded-lg object-cover"}
+          />
+        </a>
+        <DownloadButton
+          onClick={download}
+          busy={saving}
+          testId={`media-download-${m.id}`}
+          className="absolute right-1.5 top-1.5 bg-black/60 text-white opacity-90 shadow hover:bg-black/75 group-hover:opacity-100"
         />
-      </a>
+      </div>
     );
   }
 
   if (kind === "audio") {
     return url ? (
-      <audio controls src={url} className="h-10 w-64 max-w-full" data-testid={`media-audio-${m.id}`} />
+      <div className="flex flex-wrap items-center gap-1">
+        <audio controls src={url} className="h-10 w-64 max-w-full" data-testid={`media-audio-${m.id}`} />
+        <DownloadButton onClick={download} busy={saving} testId={`media-download-${m.id}`} className="text-forest hover:bg-black/5" />
+      </div>
     ) : (
       <div className="flex h-10 w-64 max-w-full items-center justify-center rounded-full bg-black/5 text-muted">{loading ? <Spinner /> : "Voice note"}</div>
     );
   }
 
   if (kind === "video") {
-    return url ? (
-      <video controls src={url} className="max-h-72 w-auto max-w-full rounded-lg" data-testid={`media-video-${m.id}`} />
-    ) : (
-      <button
-        type="button"
-        onClick={load}
-        className="grid h-40 w-64 max-w-full place-items-center rounded-lg bg-black/70 text-white"
-        data-testid={`media-video-load-${m.id}`}
-      >
-        {loading ? <Spinner /> : <Play size={28} weight="fill" />}
-      </button>
+    return (
+      <div className="space-y-1">
+        {url ? (
+          <video controls src={url} className="max-h-72 w-auto max-w-full rounded-lg" data-testid={`media-video-${m.id}`} />
+        ) : (
+          <button
+            type="button"
+            onClick={load}
+            className="grid h-40 w-64 max-w-full place-items-center rounded-lg bg-black/70 text-white"
+            data-testid={`media-video-load-${m.id}`}
+          >
+            {loading ? <Spinner /> : <Play size={28} weight="fill" />}
+          </button>
+        )}
+        <DownloadButton onClick={download} busy={saving} testId={`media-download-${m.id}`} className="text-forest hover:bg-black/5" />
+      </div>
     );
   }
 
   // document (and anything else with a file)
-  const open = async () => {
-    const u = url || (await loadUrl(m.id).catch(async (e) => {
-      throw new Error(await readError(e));
-    }));
-    const a = document.createElement("a");
-    a.href = u;
-    a.download = name || "file";
-    a.target = "_blank";
-    a.rel = "noreferrer";
-    a.click();
-  };
   return (
     <div className="flex items-center gap-3 rounded-lg bg-black/5 px-3 py-2" data-testid={`media-file-${m.id}`}>
       <FileText size={26} className="shrink-0 text-forest" />
@@ -148,11 +208,12 @@ export default function MessageMedia({ m }) {
       <button
         type="button"
         className="rounded-md p-1.5 text-forest hover:bg-black/5"
-        onClick={() => open().catch((e) => load())}
+        onClick={download}
         title="Download"
         aria-label="Download"
+        data-testid={`media-download-${m.id}`}
       >
-        {loading ? <Spinner /> : <DownloadSimple size={18} />}
+        {loading || saving ? <Spinner /> : <DownloadSimple size={18} />}
       </button>
     </div>
   );
