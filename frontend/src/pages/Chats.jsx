@@ -408,7 +408,8 @@ function Thread({ sel, onBack, onSent }) {
 
   const { contact, messages, number } = thread;
   const left = hoursLeft(contact.window_closes_at);
-  const canReply = contact.window_open && number.can_send;
+  const lateReply = !contact.window_open && !!number.late_reply; // typed replies go out as the late-reply template
+  const canReply = number.can_send && (contact.window_open || lateReply);
 
   const pickFile = (f) => {
     if (!f) return;
@@ -431,6 +432,7 @@ function Thread({ sel, onBack, onSent }) {
       setText("");
       setFile(null);
       onSent();
+      if (!file && lateReply) toast.success(`Sent as the "${number.late_reply}" template`);
     } catch (err) {
       toast.error(errorMessage(err));
       load();
@@ -473,10 +475,21 @@ function Thread({ sel, onBack, onSent }) {
         <form onSubmit={send} className="border-t border-line bg-white p-3" data-testid="reply-form">
           {!number.can_send ? (
             <p className="text-xs text-muted">This number is paused or not set up for sending. Check Settings → WhatsApp numbers.</p>
+          ) : lateReply ? (
+            <div className="flex flex-wrap items-center justify-between gap-2" data-testid="late-reply-note">
+              <p className="text-xs text-muted">
+                The 24-hour window has closed, so your reply will be sent as the <b>{number.late_reply}</b> template (small Meta fee), with the
+                customer's name and order filled in. Photos and files need an open window.
+              </p>
+              <Button size="sm" variant="outline" onClick={() => setTplFor({ order: null, confirmation: false })} type="button" data-testid="open-template-btn">
+                <FileText size={14} /> Other template
+              </Button>
+            </div>
           ) : !contact.window_open ? (
             <div className="flex flex-wrap items-center justify-between gap-2" data-testid="window-closed-note">
               <p className="text-xs text-muted">
-                Typed replies only work within 24 hours of the customer's last message. To message them now, send an approved template.
+                Typed replies only work within 24 hours of the customer's last message. Send an approved template, or set one up for late
+                replies: open Send template, set a blank to "Your message" and tick "Use for replies after 24 hours".
               </p>
               <Button size="sm" onClick={() => setTplFor({ order: null, confirmation: false })} type="button" data-testid="open-template-btn">
                 <FileText size={14} /> Send template
@@ -513,7 +526,7 @@ function Thread({ sel, onBack, onSent }) {
               }}
               data-testid="attach-input"
             />
-            {canReply && (
+            {canReply && !lateReply && (
               <Button type="button" variant="outline" onClick={() => fileInput.current?.click()} title="Attach a photo or file" aria-label="Attach a photo or file" data-testid="attach-btn">
                 <Paperclip size={16} />
               </Button>
@@ -532,7 +545,9 @@ function Thread({ sel, onBack, onSent }) {
                 canReply
                   ? file
                     ? "Add a caption (optional)…"
-                    : "Type a reply… (Enter to send, Shift+Enter for a new line)"
+                    : lateReply
+                      ? `Type a reply… (sent as the "${number.late_reply}" template)`
+                      : "Type a reply… (Enter to send, Shift+Enter for a new line)"
                   : "Replies are disabled for this chat"
               }
               disabled={!canReply || sending}
@@ -579,9 +594,12 @@ function Thread({ sel, onBack, onSent }) {
         orders={thread.orders}
         order={tplFor?.order || null}
         confirmation={!!tplFor?.confirmation}
+        message={text}
         onSent={(res) => {
-          if (res?.contact && res.contact.number_label === contact.number_label) setThread(res);
-          else load();
+          if (res?.contact && res.contact.number_label === contact.number_label) {
+            setThread(res);
+            setText(""); // the typed text may have gone out as the template's message
+          } else load();
           onSent();
         }}
       />

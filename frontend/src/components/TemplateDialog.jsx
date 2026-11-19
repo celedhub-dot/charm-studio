@@ -17,6 +17,7 @@ const FIELDS = [
   { value: "notes", label: "Notes" },
   { value: "shop_name", label: "Shop name" },
   { value: "phone", label: "Customer phone" },
+  { value: "message", label: "Your message (typed in the reply box)" },
   { value: "custom", label: "Type it in" },
 ];
 const FIELD_KEYS = new Set(FIELDS.map((f) => f.value).filter((v) => v !== "custom"));
@@ -27,6 +28,7 @@ const tplKey = (t) => `${t.name}|${t.language}`;
 // Guess a field from a named blank like {{customer_name}} or {{order_id}}.
 function guessField(name) {
   const n = name.toLowerCase();
+  if (/message|update|text|detail/.test(n)) return "message";
   if (/order/.test(n)) return "order_id";
   if (/charm/.test(n)) return "charm";
   if (/print|product|engrav/.test(n)) return "product_name";
@@ -62,7 +64,18 @@ const render = (text, names, values) => {
  *  orders: orders that can fill the blanks; order: the one to start with (and mark as confirmed).
  *  confirmation: true when opened from "Send confirmation" (starts on the saved confirmation template).
  */
-export default function TemplateDialog({ open, onClose, numberLabel, phone, contactName = "", orders = [], order = null, confirmation = false, onSent }) {
+export default function TemplateDialog({
+  open,
+  onClose,
+  numberLabel,
+  phone,
+  contactName = "",
+  orders = [],
+  order = null,
+  confirmation = false,
+  message = "",
+  onSent,
+}) {
   const { settings: appSettings } = useSession();
   const [numbers, setNumbers] = useState([]);
   const [number, setNumber] = useState("");
@@ -73,7 +86,9 @@ export default function TemplateDialog({ open, onClose, numberLabel, phone, cont
   const [orderId, setOrderId] = useState("");
   const [slots, setSlots] = useState({ header: [], body: [] });
   const [remember, setRemember] = useState(true);
+  const [lateReply, setLateReply] = useState(false); // use this template for replies after the 24-hour window
   const [sending, setSending] = useState(false);
+  const [savingOnly, setSavingOnly] = useState(false);
 
   const orderList = useMemo(() => {
     const list = [...orders];
@@ -137,6 +152,8 @@ export default function TemplateDialog({ open, onClose, numberLabel, phone, cont
     const build = (names, savedList = []) =>
       names.map((n, i) => (savedList[i] !== undefined ? fromSaved(savedList[i]) : { field: tpl.named ? guessField(n) : "custom", text: "" }));
     setSlots({ header: build(tpl.header_params, saved.header), body: build(tpl.body_params, saved.body) });
+    const late = data?.settings?.late_reply;
+    setLateReply(!!late?.name && `${late.name}|${late.language}` === tplKey(tpl));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, data]);
 
@@ -148,7 +165,9 @@ export default function TemplateDialog({ open, onClose, numberLabel, phone, cont
     notes: currentOrder?.notes || "",
     shop_name: appSettings?.shop?.shop_name || "",
     phone: phone ? `+${phone}` : "",
+    message,
   };
+  const hasMessageBlank = [...slots.header, ...slots.body].some((x) => x.field === "message");
   const valueOf = (slot) => (slot.field === "custom" ? slot.text : ctx[slot.field] || "");
   const headerVals = slots.header.map(valueOf);
   const bodyVals = slots.body.map(valueOf);
@@ -156,6 +175,36 @@ export default function TemplateDialog({ open, onClose, numberLabel, phone, cont
 
   const setSlot = (part, i, patch) =>
     setSlots((s) => ({ ...s, [part]: s[part].map((x, j) => (j === i ? { ...x, ...patch } : x)) }));
+
+  const nextSettings = () => {
+    const s = data.settings || {};
+    const me = { name: tpl.name, language: tpl.language };
+    const isLate = s.late_reply?.name && `${s.late_reply.name}|${s.late_reply.language}` === tplKey(tpl);
+    return {
+      confirmation: confirmation || !s.confirmation?.name ? me : s.confirmation,
+      late_reply: lateReply && hasMessageBlank ? me : isLate ? { name: "", language: "" } : s.late_reply || { name: "", language: "" },
+      maps: {
+        ...(s.maps || {}),
+        [tplKey(tpl)]: { header: slots.header.map((x) => toSaved(x, ctx)), body: slots.body.map((x) => toSaved(x, ctx)) },
+      },
+    };
+  };
+
+  const saveOnly = async () => {
+    if (!tpl) return;
+    setSavingOnly(true);
+    try {
+      const res = await saveSettings("templates", nextSettings());
+      setData((d) => ({ ...d, settings: res.templates }));
+      toast.success(lateReply ? `Replies after 24 hours will be sent as "${tpl.name}"` : "Saved");
+      onSent?.(null);
+      onClose();
+    } catch (e) {
+      toast.error(errorMessage(e));
+    } finally {
+      setSavingOnly(false);
+    }
+  };
 
   const send = async () => {
     if (!tpl || missing) return;
@@ -170,17 +219,7 @@ export default function TemplateDialog({ open, onClose, numberLabel, phone, cont
         body_params: bodyVals,
         order_id: currentOrder?.id || null,
       });
-      if (remember) {
-        const s = data.settings || {};
-        const next = {
-          confirmation: confirmation || !s.confirmation?.name ? { name: tpl.name, language: tpl.language } : s.confirmation,
-          maps: {
-            ...(s.maps || {}),
-            [tplKey(tpl)]: { header: slots.header.map((x) => toSaved(x, ctx)), body: slots.body.map((x) => toSaved(x, ctx)) },
-          },
-        };
-        saveSettings("templates", next).catch(() => {});
-      }
+      if (remember) saveSettings("templates", nextSettings()).catch(() => {});
       toast.success(`Sent "${tpl.name}" to +${phone}`);
       onSent?.(res);
       onClose();
@@ -352,6 +391,15 @@ export default function TemplateDialog({ open, onClose, numberLabel, phone, cont
                 <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} data-testid="tpl-remember" />
                 Remember which field fills each blank{confirmation ? " and use this template for Send confirmation" : ""}
               </label>
+              {hasMessageBlank && (
+                <label className="flex items-start gap-2 rounded-lg border border-forest/30 bg-forest-50 p-2.5 text-xs text-ink" data-testid="tpl-late-reply-label">
+                  <input type="checkbox" className="mt-0.5" checked={lateReply} onChange={(e) => setLateReply(e.target.checked)} data-testid="tpl-late-reply" />
+                  <span>
+                    <b>Use for replies after 24 hours.</b> When a chat's reply window has closed, staff just type in the reply box and it's sent
+                    with this template, with the customer's details filled in. Meta charges a small fee for each one.
+                  </span>
+                </label>
+              )}
             </>
           ) : null}
         </div>
@@ -360,6 +408,11 @@ export default function TemplateDialog({ open, onClose, numberLabel, phone, cont
           <Button variant="outline" onClick={onClose} data-testid="tpl-cancel-btn">
             Cancel
           </Button>
+          {tpl && hasMessageBlank && (
+            <Button variant="outline" onClick={saveOnly} disabled={savingOnly || sending} data-testid="tpl-save-only-btn">
+              {savingOnly ? <Spinner /> : null} Save without sending
+            </Button>
+          )}
           <Button onClick={send} disabled={!tpl || missing || sending || !number} data-testid="tpl-send-btn">
             {sending ? <Spinner /> : <PaperPlaneRight size={16} weight="fill" />} Send
           </Button>

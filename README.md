@@ -149,6 +149,18 @@ WhatsApp only allows typed replies within 24 hours of the customer's last messag
 
 Templates with image/video/document headers or link buttons that contain a variable are listed but can't be sent from Charm.Studio yet.
 
+**Replying after 24 hours (late replies).** Create a Utility template with a blank for the staff's own text, for example:
+
+```
+Hi {{1}}, here is an update about your order {{2}}:
+
+{{3}}
+
+Reply to this message if you have any questions. Thank you for shopping with Celed Hub!
+```
+
+(Meta rejects templates that start or end with a blank, or that are mostly blanks, so keep fixed text around `{{3}}`.) Once it's approved, open **Send template** in any chat, pick it, set the blanks to *Customer name*, *Order ID* and *Your message*, tick **Use for replies after 24 hours** and click **Save without sending**. From then on, when a chat's window has closed, staff just type in the reply box and Charm.Studio sends it with that template (a small Meta fee each). If the customer has no order ID saved, it says so instead of sending; a missing WhatsApp name becomes "there". Photos and files still need an open window. Use it only for order-related messages: promotional text in a Utility template breaks Meta's rules.
+
 ## API summary
 
 | Method | Path | Purpose |
@@ -168,13 +180,13 @@ Templates with image/video/document headers or link buttons that contain a varia
 | GET | `/api/inbox/conversations` | chat list (`?q=` searches phone, name, order ID, message text; `?number=`) |
 | GET | `/api/inbox/conversations/{number}/{phone}` | one chat: messages, contact, orders; marks it read |
 | POST | `/api/inbox/conversations/{number}/{phone}/read-orders` | have the bot read the chat again now |
-| POST | `/api/inbox/send` | staff reply (409 when the 24-hour window is closed) |
+| POST | `/api/inbox/send` | staff reply; after 24 hours it's sent with the late-reply template if one is set up (`sent_as_template` in the response), otherwise 409 |
 | GET | `/api/inbox/media/{message_id}` | the photo/voice note/file on a message (fetched from WhatsApp, cached briefly) |
 | POST | `/api/inbox/send-media` | staff send a file (multipart: `number_label`, `to`, `caption`, `file`); same 24-hour rule |
 | GET | `/api/inbox/unread` | unread chat count for the nav badge |
 | GET | `/api/inbox/templates?number=` | the number's templates (`refresh=true` reloads from WhatsApp) and the remembered settings |
 | POST | `/api/inbox/send-template` | send an approved template (any time); `order_id` marks that order confirmed |
-| PUT | `/api/settings/templates` | which template "Send confirmation" uses and which field fills each blank |
+| PUT | `/api/settings/templates` | which template "Send confirmation" and late replies use, and which field fills each blank |
 | GET | `/api/orders/sheet.pdf` | order sheet PDF (`start`, `end` ISO times, `tz` minutes, `title`; up to 93 days) |
 | GET | `/api/wa/status`, `/api/wa/numbers`, `/api/wa/conversations` | bot status |
 | POST | `/api/wa/test-send` | send a test message |

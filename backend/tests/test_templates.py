@@ -64,6 +64,8 @@ RAW_TEMPLATES = [
         "name": "shipped", "language": "en_US", "status": "APPROVED", "category": "UTILITY", "parameter_format": "NAMED",
         "components": [{"type": "BODY", "text": "Hi {{customer}}, order {{order_id}} has shipped."}],
     },
+    {"name": "order_update", "language": "en", "status": "APPROVED", "category": "UTILITY",
+     "components": [{"type": "BODY", "text": "Hi {{1}}, update on your order {{2}}: {{3}}"}]},
     {"name": "promo", "language": "en", "status": "PENDING", "category": "MARKETING",
      "components": [{"type": "BODY", "text": "Big sale!"}]},
     {"name": "with_image", "language": "en", "status": "APPROVED", "category": "MARKETING",
@@ -144,7 +146,7 @@ try:
         fetches.clear()
         data = c.get("/api/inbox/templates", headers=H(tok), params={"number": "Shop"}).json()
         tpls = {t["name"]: t for t in data["templates"]}
-        check([t["name"] for t in data["templates"][:2]] == ["order_confirmation", "shipped"], "sendable templates listed first")
+        check([t["name"] for t in data["templates"][:3]] == ["order_confirmation", "order_update", "shipped"], "sendable templates listed first")
         oc = tpls["order_confirmation"]
         check(oc["sendable"] and oc["status"] == "APPROVED" and oc["header_params"] == ["1"] and oc["body_params"] == ["1", "2", "3", "4"], "positional blanks found", str(oc))
         check(oc["footer"] == "Celed Hub" and oc["buttons"] == ["Thanks"] and not oc["named"], "footer and buttons kept")
@@ -213,6 +215,37 @@ try:
         s = c.get("/api/inbox/templates", headers=H(tok), params={"number": "Shop"}).json()["settings"]
         check(s["maps"]["order_confirmation|en"]["body"][2] == "{product_name}", "field mapping returned with the templates")
         check(c.get("/api/settings", headers=H(tok)).json()["templates"]["maps"], "settings endpoint includes templates")
+
+        print("Late replies (after the 24-hour window)")
+        late_text = {"number_label": "Shop", "to": "919876543210", "text": "Your charm is ready.\nShipping today!"}
+        th = c.get("/api/inbox/conversations/Shop/919876543210", headers=H(tok)).json()
+        check(th["number"]["late_reply"] == "" and not th["contact"]["window_open"], "no late-reply template yet, window closed")
+        check(c.post("/api/inbox/send", headers=H(tok), json=late_text).status_code == 409, "typed reply still refused without a late-reply template")
+        maps = {"order_confirmation|en": {"header": ["{order_id}"], "body": ["{customer_name}", "{order_id}", "{product_name}", "{charm}"]},
+                "order_update|en": {"header": [], "body": ["{customer_name}", "{order_id}", "{customer_name}"]}}
+        c.put("/api/settings/templates", headers=H(tok), json={"confirmation": {"name": "order_confirmation", "language": "en"},
+                                                                "late_reply": {"name": "order_update", "language": "en"}, "maps": maps})
+        check(c.get("/api/inbox/conversations/Shop/919876543210", headers=H(tok)).json()["number"]["late_reply"] == "",
+              "late-reply template ignored until one blank holds the message")
+        maps["order_update|en"]["body"][2] = "{message}"
+        r = c.put("/api/settings/templates", headers=H(tok), json={"confirmation": {"name": "order_confirmation", "language": "en"},
+                                                                    "late_reply": {"name": "order_update", "language": "en"}, "maps": maps})
+        check(r.json()["templates"]["late_reply"]["name"] == "order_update", "late-reply template saved")
+        check(c.get("/api/inbox/conversations/Shop/919876543210", headers=H(tok)).json()["number"]["late_reply"] == "order_update", "chat knows late replies are on")
+        before = len(sent)
+        r = c.post("/api/inbox/send", headers=H(tok), json=late_text)
+        check(r.status_code == 200 and r.json().get("sent_as_template") == "order_update", "typed reply sent after 24 hours", r.text)
+        p = sent[-1]["payload"]
+        check(len(sent) == before + 1 and p["type"] == "template" and p["template"]["name"] == "order_update", "went out as the template")
+        check([x["text"] for x in p["template"]["components"][0]["parameters"]] == ["Riya", "123456789012_1", "Your charm is ready. Shipping today!"],
+              "name and order ID filled in, message in its blank (new line removed)", str(p))
+        out = [m for m in r.json()["messages"] if m["direction"] == "out"][-1]
+        check(out["kind"] == "template" and out["body"] == "Hi Riya, update on your order 123456789012_1: Your charm is ready. Shipping today!", "chat shows the full text")
+        r = c.post("/api/inbox/send", headers=H(tok), json={**late_text, "to": "917000011111"})
+        check(r.status_code == 409 and "order ID" in r.json()["detail"], "customer with no order ID gets a clear message", r.text)
+        c.post(hook, json={"messages": [{"id": "wamid.NEW", "from": "919876543210", "type": "text", "timestamp": str(int(time.time())), "text": {"body": "ok thanks"}}]})
+        r = c.post("/api/inbox/send", headers=H(tok), json={**late_text, "text": "You're welcome!"})
+        check(r.status_code == 200 and sent[-1]["payload"]["type"] == "text" and not r.json().get("sent_as_template"), "open window: normal free reply again")
         check(c.post("/api/inbox/send-template", json=base).status_code == 401, "sending needs login")
 
     print(f"\nALL {passed} CHECKS PASSED")

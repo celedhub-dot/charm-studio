@@ -176,7 +176,8 @@ DEFAULT_SETTINGS: Dict[str, Dict[str, Any]] = {
     },
     "labels": {"position": "bottom-right", "font_size": 8, "skip_unmatched": False},
     # confirmation: the template behind "Send confirmation"; maps: "name|language" -> what fills each blank
-    "templates": {"confirmation": {"name": "", "language": ""}, "maps": {}},
+    # late_reply: the template typed replies go out as once the 24-hour window has closed
+    "templates": {"confirmation": {"name": "", "language": ""}, "late_reply": {"name": "", "language": ""}, "maps": {}},
 }
 
 
@@ -2284,6 +2285,7 @@ async def _thread(label: str, phone: str) -> Dict[str, Any]:
             "can_send": bool(cfg and cfg["active"] and cfg["token"]),
             "bot_mode": cfg.get("bot_mode") if cfg else None,
             "provider": cfg.get("provider") if cfg else None,
+            "late_reply": late_reply_template_name(),
         },
     }
 
@@ -2304,11 +2306,15 @@ async def inbox_read_orders(label: str, phone: str):
     return {**result, "ai_ready": ai_ready()}
 
 
-async def ensure_reply_window(cfg: Dict[str, Any], to: str) -> None:
+async def reply_window_open(cfg: Dict[str, Any], to: str) -> bool:
     last_in = await db().fetchval(
         "SELECT last_inbound_at FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", cfg["logical_id"], to
     )
-    if not last_in or last_in.timestamp() + REPLY_WINDOW < time.time():
+    return bool(last_in and last_in.timestamp() + REPLY_WINDOW >= time.time())
+
+
+async def ensure_reply_window(cfg: Dict[str, Any], to: str) -> None:
+    if not await reply_window_open(cfg, to):
         raise HTTPException(
             409,
             "WhatsApp only allows typed replies within 24 hours of the customer's last message. "
@@ -2320,7 +2326,10 @@ async def ensure_reply_window(cfg: Dict[str, Any], to: str) -> None:
 async def inbox_send(payload: InboxSendIn):
     cfg = sending_number(payload.number_label)
     to = clean_recipient(payload.to)
-    await ensure_reply_window(cfg, to)
+    if not await reply_window_open(cfg, to):
+        if not late_reply_template_name():
+            await ensure_reply_window(cfg, to)  # raises the usual 409
+        return await send_late_reply(cfg, to, payload.text)
     try:
         resp = await send_wa(cfg, to, payload.text.strip(), source="staff")
     except httpx.HTTPError as e:
@@ -2497,6 +2506,17 @@ async def inbox_send_template(payload: TemplateSendIn):
     if missing:
         raise HTTPException(400, "Fill in every blank: " + ", ".join("{{%s}}" % n for n in missing))
 
+    await deliver_template(cfg, to, tpl, header_vals, body_vals)
+    order = None
+    if payload.order_id:
+        row = await db().fetchrow(f"UPDATE orders SET confirmed_at = now() WHERE id = $1 RETURNING {ORDER_SELECT}", payload.order_id)
+        order = row_dict(row)
+    return {**await _thread(cfg["logical_id"], to), "order": order}
+
+
+async def deliver_template(cfg: Dict[str, Any], to: str, tpl: Dict[str, Any], header_vals: List[str], body_vals: List[str]) -> None:
+    """Send a filled-in template and record it in the chat. Raises HTTPException(502) if WhatsApp refuses it."""
+
     def params(names: List[str], values: List[str]) -> List[Dict[str, str]]:
         return [{"type": "text", "text": v, **({"parameter_name": n} if tpl["named"] else {})} for n, v in zip(names, values)]
 
@@ -2523,11 +2543,69 @@ async def inbox_send_template(payload: TemplateSendIn):
         raise HTTPException(502, f"Could not reach WhatsApp: {e}")
     if resp.status_code >= 300:
         raise HTTPException(502, f"WhatsApp didn't accept the template: {_api_error(resp)}")
-    order = None
-    if payload.order_id:
-        row = await db().fetchrow(f"UPDATE orders SET confirmed_at = now() WHERE id = $1 RETURNING {ORDER_SELECT}", payload.order_id)
-        order = row_dict(row)
-    return {**await _thread(cfg["logical_id"], to), "order": order}
+
+
+# Values a template blank can be filled with: "{field}" tokens, or fixed text.
+TEMPLATE_FIELDS = ("customer_name", "order_id", "product_name", "charm", "notes", "shop_name", "phone", "message")
+FIELD_LABELS = {"customer_name": "customer name", "order_id": "order ID", "product_name": "name on product",
+                "charm": "charm", "notes": "notes", "shop_name": "shop name", "phone": "phone", "message": "message"}
+
+
+def late_reply_template_name() -> str:
+    """The late-reply template's name, if it's chosen and one of its blanks holds the staff's message."""
+    t = SETTINGS.get("templates", {})
+    ref = t.get("late_reply") or {}
+    m = (t.get("maps") or {}).get(f"{ref.get('name')}|{ref.get('language')}") or {}
+    return ref.get("name", "") if ref.get("name") and "{message}" in (m.get("header") or []) + (m.get("body") or []) else ""
+
+
+async def send_late_reply(cfg: Dict[str, Any], to: str, text: str) -> Dict[str, Any]:
+    """After the 24-hour window, send a typed reply through the chosen template (the text fills its message blank)."""
+    t = SETTINGS.get("templates", {})
+    ref = t["late_reply"]
+    mapping = t["maps"][f"{ref['name']}|{ref['language']}"]
+
+    def find(templates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        return next((x for x in templates if x["name"] == ref["name"] and x["language"] == ref["language"]), None)
+
+    tpl = find(await number_templates(cfg)) or find(await number_templates(cfg, refresh=True))
+    if not tpl or not tpl["sendable"]:
+        raise HTTPException(409, f"The late-reply template '{ref['name']}' isn't approved on {cfg['label']}. "
+                                 "Check it in WhatsApp Manager, or choose another one with Send template.")
+    contact = await db().fetchrow("SELECT name FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", cfg["logical_id"], to)
+    order = await db().fetchrow(
+        f"SELECT {ORDER_SELECT} FROM orders WHERE customer_phone = $1 ORDER BY created_at DESC LIMIT 1", to
+    )
+    ctx = {
+        "customer_name": (contact["name"] if contact else "") or "there",  # "Hi there," when WhatsApp gave no name
+        "order_id": order["order_id"] if order else "",
+        "product_name": order["product_name"] if order else "",
+        "charm": order["charm"] if order else "",
+        "notes": order["notes"] if order else "",
+        "shop_name": SETTINGS.get("shop", {}).get("shop_name", ""),
+        "phone": f"+{to}",
+        "message": text,
+    }
+
+    def fill(tokens: List[str], names: List[str]) -> List[str]:
+        if len(tokens) != len(names):
+            raise HTTPException(409, f"The late-reply template '{tpl['name']}' changed. Open Send template, pick it and save the blanks again.")
+        out = []
+        for token in tokens:
+            m = re.fullmatch(r"\{([a-z_]+)\}", token or "")
+            value = ctx.get(m.group(1), "") if m and m.group(1) in TEMPLATE_FIELDS else (token or "")
+            value = clean_param(value)
+            if not value:
+                what = FIELD_LABELS.get(m.group(1), m.group(1)) if m else "a fixed text"
+                raise HTTPException(409, f"This customer has no {what} saved, which the late-reply template needs. "
+                                         "Add it to their order, or use Send template and type it in.")
+            out.append(value)
+        return out
+
+    header_vals = fill(mapping.get("header") or [], tpl["header_params"])
+    body_vals = fill(mapping.get("body") or [], tpl["body_params"])
+    await deliver_template(cfg, to, tpl, header_vals, body_vals)
+    return {**await _thread(cfg["logical_id"], to), "sent_as_template": tpl["name"]}
 
 
 # ---------------------------------------------------------------------------
@@ -2753,6 +2831,7 @@ class TemplateMap(BaseModel):
 
 class TemplateSettingsIn(BaseModel):
     confirmation: TemplateRef = Field(default_factory=TemplateRef)
+    late_reply: TemplateRef = Field(default_factory=TemplateRef)
     maps: Dict[str, TemplateMap] = Field(default_factory=dict, max_length=100)
 
 
