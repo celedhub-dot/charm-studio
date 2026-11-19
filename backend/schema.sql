@@ -96,6 +96,9 @@ CREATE INDEX IF NOT EXISTS orders_customer_phone_idx ON orders (customer_phone);
 ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS provider    text NOT NULL DEFAULT 'meta';
 ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS bot_mode    text NOT NULL DEFAULT 'ask';
 ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS webhook_key text NOT NULL DEFAULT '';
+ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS waba_id     text NOT NULL DEFAULT '';  -- Meta: needed to list templates
+-- When an order confirmation template was last sent for this order
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_at timestamptz;
 
 -- Every WhatsApp message in and out (customer, bot, staff, or sent from the phone app).
 CREATE TABLE IF NOT EXISTS wa_messages (

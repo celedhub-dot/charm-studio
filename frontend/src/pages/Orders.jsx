@@ -14,6 +14,8 @@ import {
   Package,
   FilePdf,
   ChatCenteredText,
+  PaperPlaneRight,
+  SealCheck,
 } from "@phosphor-icons/react";
 import {
   getOrders,
@@ -31,6 +33,7 @@ import { Card, CardContent, CardHeader, CardTitle, Input, Label, Table, THead, T
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, ConfirmDialog } from "../components/ui/overlays";
 import { Button } from "../components/ui/button";
 import { emptyOrder, formatDate } from "../lib/utils";
+import TemplateDialog from "../components/TemplateDialog";
 
 const HEADER_ALIASES = {
   order_id: ["order_id", "orderid", "order id", "order", "id", "sub order no", "suborder", "sub_order_no"],
@@ -160,6 +163,7 @@ export default function Orders() {
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [confirmFor, setConfirmFor] = useState(null); // order being confirmed on WhatsApp
   const fileRef = useRef(null);
 
   const exportCsv = async () => {
@@ -407,7 +411,14 @@ export default function Orders() {
                     </TR>
                   ) : (
                     <TR key={o.id} data-testid={`order-row-${o.id}`}>
-                      <TD className="pl-5 font-mono text-[13px]">{o.order_id || "—"}</TD>
+                      <TD className="pl-5 font-mono text-[13px]">
+                        <span className="inline-flex items-center gap-1">
+                          {o.order_id || "—"}
+                          {o.confirmed_at && (
+                            <SealCheck size={14} weight="fill" className="text-forest" title={`Confirmation sent ${formatDate(o.confirmed_at)}`} data-testid={`order-confirmed-icon-${o.id}`} />
+                          )}
+                        </span>
+                      </TD>
                       <TD>{o.product_name || <span className="text-muted">—</span>}</TD>
                       <TD>{o.charm || <span className="text-muted">—</span>}</TD>
                       <TD className="max-w-[220px] truncate" title={o.notes}>
@@ -437,6 +448,18 @@ export default function Orders() {
                       <TD className="whitespace-nowrap text-xs text-muted">{formatDate(o.created_at)}</TD>
                       <TD className="pr-5">
                         <div className="flex justify-end gap-1">
+                          {o.customer_phone && (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => setConfirmFor(o)}
+                              data-testid={`confirm-order-${o.id}-btn`}
+                              aria-label="Send confirmation on WhatsApp"
+                              title={o.confirmed_at ? `Confirmation sent ${formatDate(o.confirmed_at)}. Send again?` : "Send confirmation on WhatsApp"}
+                            >
+                              <PaperPlaneRight size={16} className={o.confirmed_at ? "text-muted" : "text-forest"} />
+                            </Button>
+                          )}
                           <Button size="icon" variant="ghost" onClick={() => startEdit(o)} data-testid={`edit-order-${o.id}-btn`} aria-label="Edit">
                             <PencilSimple size={16} />
                           </Button>
@@ -464,6 +487,18 @@ export default function Orders() {
       </Card>
 
       <OrderSheetDialog open={sheetOpen} onClose={() => setSheetOpen(false)} />
+
+      <TemplateDialog
+        open={!!confirmFor}
+        onClose={() => setConfirmFor(null)}
+        numberLabel={confirmFor?.channel || ""}
+        phone={confirmFor?.customer_phone || ""}
+        order={confirmFor}
+        confirmation
+        onSent={(res) => {
+          if (res?.order) setOrders((list) => list.map((x) => (x.id === res.order.id ? res.order : x)));
+        }}
+      />
 
       <Dialog open={!!importRows} onOpenChange={(v) => !v && setImportRows(null)}>
         <DialogContent className="max-w-4xl">

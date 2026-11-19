@@ -22,7 +22,7 @@ import { EmptyState } from "../../components/common";
 import PasswordInput from "../../components/PasswordInput";
 import { formatDate } from "../../lib/utils";
 
-const EMPTY = { label: "", provider: "meta", phone_id: "", token: "", display: "", verify_token: "", bot_mode: "" };
+const EMPTY = { label: "", provider: "meta", phone_id: "", token: "", display: "", verify_token: "", bot_mode: "", waba_id: "" };
 
 export const BOT_MODES = [
   { value: "read", label: "Read only: save order details, never message customers" },
@@ -53,6 +53,7 @@ function NumberDialog({ open, number, onClose, onSaved }) {
             display: number.display,
             verify_token: "",
             bot_mode: number.bot_mode || "ask",
+            waba_id: number.waba_id || "",
           }
         : EMPTY
     );
@@ -82,6 +83,7 @@ function NumberDialog({ open, number, onClose, onSaved }) {
         const patch = { label: form.label, phone_id: form.phone_id, display: form.display, bot_mode: botMode, skip_check: skipCheck };
         if (form.token.trim()) patch.token = form.token.trim();
         if (!d360) {
+          patch.waba_id = form.waba_id.trim();
           if (clearVerify) patch.verify_token = "";
           else if (form.verify_token.trim()) patch.verify_token = form.verify_token.trim();
         }
@@ -189,6 +191,22 @@ function NumberDialog({ open, number, onClose, onSaved }) {
             />
             {!d360 && <p className="text-xs text-muted">Use a permanent token from a System User (Business Settings), not the 24-hour test token.</p>}
           </div>
+          {!d360 && (
+            <div className="space-y-1.5">
+              <Label htmlFor="wa-waba">WhatsApp Business Account ID (for templates)</Label>
+              <Input
+                id="wa-waba"
+                data-testid="wa-waba-input"
+                inputMode="numeric"
+                autoComplete="off"
+                placeholder="e.g. 1658055335961404"
+                value={form.waba_id}
+                onChange={set("waba_id")}
+                className="font-mono"
+              />
+              <p className="text-xs text-muted">Shown in WhatsApp Manager and on the API Setup page. Needed to send order confirmations after 24 hours.</p>
+            </div>
+          )}
           <div className="space-y-1.5">
             <Label>What the bot does</Label>
             <SimpleSelect

@@ -18,6 +18,8 @@ import {
   Copy,
   Package,
   Plus,
+  FileText,
+  SealCheck,
 } from "@phosphor-icons/react";
 import {
   getConversations,
@@ -34,6 +36,7 @@ import { SimpleSelect } from "../components/ui/overlays";
 import { Button } from "../components/ui/button";
 import { EmptyState, SourceBadge } from "../components/common";
 import { cn, timeAgo } from "../lib/utils";
+import TemplateDialog from "../components/TemplateDialog";
 
 const ORDER_FIELDS = ["order_id", "product_name", "charm", "notes"];
 const fmtPhone = (p) => (p ? `+${p}` : "");
@@ -195,7 +198,7 @@ function MessageList({ messages }) {
 }
 
 /* ---------- Orders panel ---------- */
-function OrderEditor({ order, onSaved }) {
+function OrderEditor({ order, onSaved, onConfirm }) {
   const [form, setForm] = useState(order);
   const [saving, setSaving] = useState(false);
   const dirty = ORDER_FIELDS.some((k) => (form[k] || "") !== (order[k] || ""));
@@ -265,11 +268,27 @@ function OrderEditor({ order, onSaved }) {
           {saving ? <Spinner /> : <FloppyDisk size={14} />} Save changes
         </Button>
       )}
+      {onConfirm && (
+        <div className="flex items-center justify-between gap-2 border-t border-line pt-2">
+          <span className="text-[11px] text-muted" data-testid={`order-confirmed-${order.id}`}>
+            {order.confirmed_at ? (
+              <span className="inline-flex items-center gap-1 text-forest">
+                <SealCheck size={13} weight="fill" /> Confirmed {timeAgo(order.confirmed_at)}
+              </span>
+            ) : (
+              "Not confirmed yet"
+            )}
+          </span>
+          <Button size="sm" variant="outline" disabled={dirty} title={dirty ? "Save your changes first" : ""} onClick={() => onConfirm(order)} data-testid={`order-confirm-${order.id}`}>
+            <PaperPlaneRight size={13} /> {order.confirmed_at ? "Send again" : "Send confirmation"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
 
-function OrdersPanel({ thread, onChanged }) {
+function OrdersPanel({ thread, onChanged, onConfirm }) {
   const [reading, setReading] = useState(false);
   const [adding, setAdding] = useState(false);
   const { contact, orders } = thread;
@@ -320,7 +339,7 @@ function OrdersPanel({ thread, onChanged }) {
             <b>Read chat</b> or <b>+</b>.
           </p>
         ) : (
-          orders.map((o) => <OrderEditor key={o.id} order={o} onSaved={onChanged} />)
+          orders.map((o) => <OrderEditor key={o.id} order={o} onSaved={onChanged} onConfirm={thread.number.can_send ? onConfirm : null} />)
         )}
         <Link to="/labels" className="block text-center text-xs font-medium text-forest hover:underline">
           Stamp these on labels in Label Studio →
@@ -336,6 +355,7 @@ function Thread({ sel, onBack, onSent }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [showOrders, setShowOrders] = useState(false);
+  const [tplFor, setTplFor] = useState(null); // { order, confirmation } while the template dialog is open
 
   const load = useCallback(async () => {
     try {
@@ -418,9 +438,14 @@ function Thread({ sel, onBack, onSent }) {
           {!number.can_send ? (
             <p className="text-xs text-muted">This number is paused or not set up for sending. Check Settings → WhatsApp numbers.</p>
           ) : !contact.window_open ? (
-            <p className="text-xs text-muted" data-testid="window-closed-note">
-              WhatsApp only allows typed replies within 24 hours of the customer's last message. When this customer messages again, you can reply here.
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2" data-testid="window-closed-note">
+              <p className="text-xs text-muted">
+                Typed replies only work within 24 hours of the customer's last message. To message them now, send an approved template.
+              </p>
+              <Button size="sm" onClick={() => setTplFor({ order: null, confirmation: false })} type="button" data-testid="open-template-btn">
+                <FileText size={14} /> Send template
+              </Button>
+            </div>
           ) : null}
           <div className="mt-1 flex items-end gap-2">
             <Textarea
@@ -438,6 +463,18 @@ function Thread({ sel, onBack, onSent }) {
               }}
               className="max-h-40 min-h-[42px] resize-none"
             />
+            {canReply && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setTplFor({ order: null, confirmation: false })}
+                title="Send a template"
+                aria-label="Send a template"
+                data-testid="template-btn"
+              >
+                <FileText size={16} />
+              </Button>
+            )}
             <Button type="submit" disabled={!canReply || sending || !text.trim()} data-testid="reply-send-btn" aria-label="Send">
               {sending ? <Spinner /> : <PaperPlaneRight size={16} weight="fill" />}
             </Button>
@@ -447,8 +484,24 @@ function Thread({ sel, onBack, onSent }) {
 
       {/* Orders: side panel on wide screens, toggle on smaller ones */}
       <aside className={cn("w-80 shrink-0 border-l border-line bg-cream/60", showOrders ? "block" : "hidden xl:block")}>
-        <OrdersPanel thread={thread} onChanged={load} />
+        <OrdersPanel thread={thread} onChanged={load} onConfirm={(o) => setTplFor({ order: o, confirmation: true })} />
       </aside>
+
+      <TemplateDialog
+        open={!!tplFor}
+        onClose={() => setTplFor(null)}
+        numberLabel={contact.number_label}
+        phone={contact.customer_phone}
+        contactName={contact.name}
+        orders={thread.orders}
+        order={tplFor?.order || null}
+        confirmation={!!tplFor?.confirmation}
+        onSent={(res) => {
+          if (res?.contact && res.contact.number_label === contact.number_label) setThread(res);
+          else load();
+          onSent();
+        }}
+      />
     </div>
   );
 }

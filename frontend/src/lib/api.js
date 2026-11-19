@@ -127,6 +127,9 @@ export const readOrdersAgain = (label, phone) => api.post(`${threadPath(label, p
 export const sendInboxMessage = (numberLabel, to, text) =>
   api.post("/inbox/send", { number_label: numberLabel, to, text }).then((r) => r.data);
 export const getUnread = () => api.get("/inbox/unread").then((r) => r.data);
+export const getTemplates = (number, refresh = false) =>
+  api.get("/inbox/templates", { params: { number, refresh: refresh || undefined } }).then((r) => r.data);
+export const sendTemplate = (data) => api.post("/inbox/send-template", data).then((r) => r.data);
 
 // Order sheet PDF for a period (start/end are Date objects in the user's local time)
 export const downloadOrderSheet = async (start, end, title) => {

@@ -62,6 +62,7 @@ log = logging.getLogger("charm_studio")
 DATABASE_URL = os.environ["DATABASE_URL"]
 ORDER_FIELDS = ("order_id", "product_name", "charm", "notes")
 ORDER_COLUMNS = "id, order_id, product_name, charm, notes, source, channel, created_at, customer_phone"
+ORDER_SELECT = ORDER_COLUMNS + ", confirmed_at"  # confirmed_at is set by sending a template, never inserted
 SOURCES = ("manual", "ai", "csv", "whatsapp")
 
 SCHEMA_SQL = (ROOT_DIR / "schema.sql").read_text(encoding="utf-8")
@@ -173,6 +174,8 @@ DEFAULT_SETTINGS: Dict[str, Dict[str, Any]] = {
         ),
     },
     "labels": {"position": "bottom-right", "font_size": 8, "skip_unmatched": False},
+    # confirmation: the template behind "Send confirmation"; maps: "name|language" -> what fills each blank
+    "templates": {"confirmation": {"name": "", "language": ""}, "maps": {}},
 }
 
 
@@ -238,6 +241,7 @@ async def load_wa_numbers() -> None:
             "provider": r["provider"] or "meta",
             "bot_mode": r["bot_mode"] or "ask",
             "webhook_key": r["webhook_key"] or "",
+            "waba_id": r["waba_id"] or "",
         }
         WA_ALL.append(cfg)
         if r["active"] and token and cfg["provider"] == "meta":
@@ -750,6 +754,7 @@ def build_order(data: Dict[str, Any]) -> Dict[str, Any]:
         "channel": str(data.get("channel") or ""),
         "created_at": now_utc(),
         "customer_phone": re.sub(r"\D", "", str(data.get("customer_phone") or "")),
+        "confirmed_at": None,
     }
 
 
@@ -770,7 +775,7 @@ async def insert_order(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def load_all_orders() -> List[Dict[str, Any]]:
-    rows = await db().fetch(f"SELECT {ORDER_COLUMNS} FROM orders ORDER BY created_at DESC")
+    rows = await db().fetch(f"SELECT {ORDER_SELECT} FROM orders ORDER BY created_at DESC")
     return [row_dict(r) for r in rows]
 
 
@@ -798,7 +803,7 @@ async def list_orders(q: Optional[str] = None):
     if q and q.strip():
         like = "%" + re.sub(r"([\\%_])", r"\\\1", q.strip()) + "%"
         rows = await db().fetch(
-            f"""SELECT {ORDER_COLUMNS} FROM orders
+            f"""SELECT {ORDER_SELECT} FROM orders
                 WHERE order_id ILIKE $1 OR product_name ILIKE $1 OR charm ILIKE $1 OR notes ILIKE $1
                    OR customer_phone ILIKE $1
                 ORDER BY created_at DESC""",
@@ -898,7 +903,7 @@ async def orders_sheet(start: str, end: str, tz: int = 0, title: str = ""):
         raise HTTPException(400, "Choose a period of up to 3 months.")
     tz = max(-720, min(tz, 840))
     rows = await db().fetch(
-        f"SELECT {ORDER_COLUMNS} FROM orders WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at ASC",
+        f"SELECT {ORDER_SELECT} FROM orders WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at ASC",
         begin, finish,
     )
     orders = [row_dict(r) for r in rows]
@@ -931,7 +936,7 @@ async def update_order(oid: str, patch: OrderPatch):
     cols = list(changes.keys())  # keys come from the pydantic model, never from user input
     sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
     row = await db().fetchrow(
-        f"UPDATE orders SET {sets} WHERE id = $1 RETURNING {ORDER_COLUMNS}", oid, *[changes[c] for c in cols]
+        f"UPDATE orders SET {sets} WHERE id = $1 RETURNING {ORDER_SELECT}", oid, *[changes[c] for c in cols]
     )
     if not row:
         raise HTTPException(404, "Order not found")
@@ -1502,6 +1507,11 @@ async def record_message(
 
 async def send_wa(cfg: Dict[str, Any], to: str, text: str, source: str = "bot") -> httpx.Response:
     body = {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, "type": "text", "text": {"body": text}}
+    return await send_payload(cfg, to, body, kind="text", text=text, source=source)
+
+
+async def send_payload(cfg: Dict[str, Any], to: str, body: Dict[str, Any], kind: str, text: str, source: str) -> httpx.Response:
+    """Send one message and record it in Chats (as sent or failed)."""
     resp = await wa_post(cfg, "messages", body)
     wamid, error = None, ""
     if resp.status_code < 300:
@@ -1513,7 +1523,7 @@ async def send_wa(cfg: Dict[str, Any], to: str, text: str, source: str = "bot") 
         error = _api_error(resp)
         log.warning("WhatsApp send failed (%s): %s", resp.status_code, resp.text[:500])
     try:
-        await record_message(cfg["logical_id"], to, "out", "text", text, wamid, "sent" if resp.status_code < 300 else "failed", source, error)
+        await record_message(cfg["logical_id"], to, "out", kind, text, wamid, "sent" if resp.status_code < 300 else "failed", source, error)
     except Exception:  # noqa: BLE001
         log.exception("Could not record outgoing message")
     return resp
@@ -1661,7 +1671,7 @@ async def save_extracted_order(label: str, customer: str, row: Dict[str, str]) -
     if not row.get("order_id"):
         return None
     existing = await db().fetchrow(
-        f"SELECT {ORDER_COLUMNS} FROM orders "
+        f"SELECT {ORDER_SELECT} FROM orders "
         "WHERE upper(regexp_replace(order_id, '[^A-Za-z0-9]', '', 'g')) = $1 AND customer_phone IN ($2, '') "
         "ORDER BY (customer_phone = $2) DESC, created_at DESC LIMIT 1",
         norm_id(row["order_id"]),
@@ -1679,7 +1689,7 @@ async def save_extracted_order(label: str, customer: str, row: Dict[str, str]) -
     cols = list(changes)
     sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
     updated = await db().fetchrow(
-        f"UPDATE orders SET {sets} WHERE id = $1 RETURNING {ORDER_COLUMNS}", existing["id"], *[changes[c] for c in cols]
+        f"UPDATE orders SET {sets} WHERE id = $1 RETURNING {ORDER_SELECT}", existing["id"], *[changes[c] for c in cols]
     )
     return row_dict(updated)
 
@@ -1919,6 +1929,7 @@ class WaNumberIn(BaseModel):
     display: str = ""
     verify_token: str = ""
     bot_mode: Optional[Literal["ask", "read", "off"]] = None
+    waba_id: str = ""  # Meta only: WhatsApp Business Account ID, for templates
     skip_check: bool = False
 
 
@@ -1930,6 +1941,7 @@ class WaNumberPatch(BaseModel):
     verify_token: Optional[str] = None  # None keeps, "" clears
     active: Optional[bool] = None
     bot_mode: Optional[Literal["ask", "read", "off"]] = None
+    waba_id: Optional[str] = None
     skip_check: bool = False
 
 
@@ -1946,6 +1958,7 @@ def wa_public(cfg: Dict[str, Any], base: str = "") -> Dict[str, Any]:
         "phone_id": cfg["phone_id"],
         "provider": cfg.get("provider", "meta"),
         "bot_mode": cfg.get("bot_mode", "ask"),
+        "waba_id": cfg.get("waba_id", ""),
         "webhook_url": number_webhook_url(base, cfg) if base and cfg.get("provider") == "360dialog" else "",
         "token_hint": f"••••{cfg['token_last4']}" if cfg.get("token_last4") else "",
         "token_ok": cfg["token"] is not None,
@@ -1972,6 +1985,13 @@ def clean_phone_id(phone_id: str, provider: str = "meta") -> str:
     if not re.fullmatch(r"\d{5,30}", phone_id):
         raise HTTPException(400, "Phone Number ID should be the long number from Meta's API Setup page (digits only).")
     return phone_id
+
+
+def clean_waba_id(value: str) -> str:
+    value = (value or "").strip()
+    if value and not re.fullmatch(r"\d{5,30}", value):
+        raise HTTPException(400, "WhatsApp Business Account ID should be digits only (from WhatsApp Manager).")
+    return value
 
 
 def clean_wa_token(token: str, provider: str = "meta") -> str:
@@ -2057,11 +2077,12 @@ async def add_wa_number(payload: WaNumberIn, request: Request):
         info = await meta_check(phone_id, token)
         display = display or info.get("display_phone_number", "")
     verify = payload.verify_token.strip()
+    waba_id = clean_waba_id(payload.waba_id) if provider == "meta" else ""
     await db().execute(
         "INSERT INTO wa_numbers (id, label, display, phone_id, token_enc, token_last4, verify_token_enc, "
-        "provider, bot_mode, webhook_key) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "provider, bot_mode, webhook_key, waba_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         number_id, label, display, phone_id, secret_box.encrypt(token), token[-4:],
-        secret_box.encrypt(verify) if verify else "", provider, bot_mode, webhook_key,
+        secret_box.encrypt(verify) if verify else "", provider, bot_mode, webhook_key, waba_id,
     )
     await load_wa_numbers()
     return wa_public(find_number(number_id), public_base_url(request))
@@ -2103,6 +2124,9 @@ async def update_wa_number(number_id: str, payload: WaNumberPatch, request: Requ
         changes["active"] = payload.active
     if payload.bot_mode is not None:
         changes["bot_mode"] = payload.bot_mode
+    if payload.waba_id is not None and provider == "meta":
+        changes["waba_id"] = clean_waba_id(payload.waba_id)
+    TEMPLATE_CACHE.pop(number_id, None)
     if changes:
         cols = list(changes)  # fixed names from this function
         sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
@@ -2231,7 +2255,7 @@ async def _thread(label: str, phone: str) -> Dict[str, Any]:
         label, phone,
     )
     orders = await db().fetch(
-        f"SELECT {ORDER_COLUMNS} FROM orders WHERE customer_phone = $1 ORDER BY created_at DESC LIMIT 50", phone
+        f"SELECT {ORDER_SELECT} FROM orders WHERE customer_phone = $1 ORDER BY created_at DESC LIMIT 50", phone
     )
     cfg = next((c for c in WA_ALL if c["logical_id"] == label), None)
     return {
@@ -2266,12 +2290,8 @@ async def inbox_read_orders(label: str, phone: str):
 
 @api.post("/inbox/send")
 async def inbox_send(payload: InboxSendIn):
-    cfg = next((c for c in WA_ALL if c["logical_id"] == payload.number_label), None)
-    if not cfg or not cfg["active"] or not cfg["token"]:
-        raise HTTPException(400, f"'{payload.number_label}' isn't an active WhatsApp number in Settings.")
-    to = re.sub(r"\D", "", payload.to)
-    if not 8 <= len(to) <= 15:
-        raise HTTPException(400, "Enter the customer's number with country code, e.g. 919876543210.")
+    cfg = sending_number(payload.number_label)
+    to = clean_recipient(payload.to)
     last_in = await db().fetchval(
         "SELECT last_inbound_at FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", cfg["logical_id"], to
     )
@@ -2279,7 +2299,7 @@ async def inbox_send(payload: InboxSendIn):
         raise HTTPException(
             409,
             "WhatsApp only allows typed replies within 24 hours of the customer's last message. "
-            "This customer hasn't messaged in the last 24 hours, so they need to message you first.",
+            "This customer hasn't messaged in the last 24 hours, so send an approved template instead.",
         )
     try:
         resp = await send_wa(cfg, to, payload.text.strip(), source="staff")
@@ -2288,6 +2308,206 @@ async def inbox_send(payload: InboxSendIn):
     if resp.status_code >= 300:
         raise HTTPException(502, f"WhatsApp didn't accept the message: {_api_error(resp)}")
     return await _thread(cfg["logical_id"], to)
+
+# ---------------------------------------------------------------------------
+# Message templates: the only way to message a customer outside the 24-hour window
+# ---------------------------------------------------------------------------
+TEMPLATE_CACHE: Dict[str, tuple] = {}  # number id -> (fetched_at, templates)
+TEMPLATE_TTL = 300
+PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
+OK_BUTTONS = {"QUICK_REPLY", "PHONE_NUMBER", "URL"}
+
+
+def _placeholders(text: str) -> List[str]:
+    seen: List[str] = []
+    for m in PLACEHOLDER_RE.finditer(text or ""):
+        if m.group(1) not in seen:
+            seen.append(m.group(1))
+    return seen
+
+
+def normalize_template(t: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce a Meta/360dialog template to what Charm.Studio needs, and say whether it can be sent from here."""
+    comps = [c for c in (t.get("components") or []) if isinstance(c, dict)]
+
+    def comp(kind: str) -> Dict[str, Any]:
+        return next((c for c in comps if str(c.get("type", "")).upper() == kind), {})
+
+    header, body, footer, buttons = comp("HEADER"), comp("BODY"), comp("FOOTER"), comp("BUTTONS")
+    header_format = str(header.get("format") or "TEXT").upper() if header else ""
+    header_text = str(header.get("text") or "") if header_format == "TEXT" else ""
+    problems: List[str] = []
+    if header and header_format != "TEXT":
+        problems.append(f"it has a {header_format.lower()} header (only text headers can be sent from Charm.Studio)")
+    button_texts: List[str] = []
+    for b in buttons.get("buttons") or []:
+        btype = str(b.get("type", "")).upper()
+        if btype not in OK_BUTTONS:
+            problems.append(f"it has a {btype.lower().replace('_', ' ')} button")
+        elif btype == "URL" and "{{" in str(b.get("url", "")):
+            problems.append("its link button has a variable")
+        button_texts.append(str(b.get("text") or ""))
+    status = str(t.get("status") or "").upper()
+    body_text = str(body.get("text") or "")
+    hp, bp = _placeholders(header_text), _placeholders(body_text)
+    named = str(t.get("parameter_format") or "").upper() == "NAMED" or any(not p.isdigit() for p in hp + bp)
+    if not named:
+        hp, bp = sorted(hp, key=int), sorted(bp, key=int)
+    if status != "APPROVED":
+        problems.insert(0, f"Meta hasn't approved it ({status.lower() or 'unknown status'})")
+    return {
+        "name": str(t.get("name") or ""),
+        "language": str(t.get("language") or ""),
+        "status": status,
+        "category": str(t.get("category") or "").upper(),
+        "header": header_text,
+        "body": body_text,
+        "footer": str(footer.get("text") or "") if footer else "",
+        "buttons": button_texts,
+        "header_params": hp,
+        "body_params": bp,
+        "named": named,
+        "sendable": not problems,
+        "problem": "; ".join(problems),
+    }
+
+
+async def fetch_templates(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Load the number's templates from its provider (raw, un-normalized)."""
+    d360 = cfg.get("provider") == "360dialog"
+    if not d360 and not cfg.get("waba_id"):
+        raise HTTPException(
+            400,
+            "To use templates with a Meta number, add its WhatsApp Business Account ID in "
+            "Settings → WhatsApp numbers → Edit.",
+        )
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            if d360:
+                resp = await client.get(
+                    f"{D360_BASE}/v1/configs/templates", params={"limit": 250}, headers={"D360-API-KEY": cfg["token"] or ""}
+                )
+            else:
+                resp = await client.get(
+                    f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{cfg['waba_id']}/message_templates",
+                    params={"limit": 250},
+                    headers={"Authorization": f"Bearer {cfg['token']}"},
+                )
+    except httpx.HTTPError:
+        raise HTTPException(502, "Couldn't reach WhatsApp to load the templates. Try again.")
+    if resp.status_code >= 300:
+        raise HTTPException(502, f"WhatsApp didn't return the templates: {_api_error(resp)}")
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    items = (data.get("waba_templates") if d360 else data.get("data")) if isinstance(data, dict) else None
+    return [t for t in (items or []) if isinstance(t, dict)]
+
+
+async def number_templates(cfg: Dict[str, Any], refresh: bool = False) -> List[Dict[str, Any]]:
+    cached = TEMPLATE_CACHE.get(cfg["id"])
+    if cached and not refresh and time.time() - cached[0] < TEMPLATE_TTL:
+        return cached[1]
+    templates = [normalize_template(t) for t in await fetch_templates(cfg)]
+    templates = [t for t in templates if t["name"]]
+    templates.sort(key=lambda t: (not t["sendable"], t["name"], t["language"]))
+    TEMPLATE_CACHE[cfg["id"]] = (time.time(), templates)
+    return templates
+
+
+def sending_number(label: str) -> Dict[str, Any]:
+    cfg = next((c for c in WA_ALL if c["logical_id"] == label), None)
+    if not cfg or not cfg["active"] or not cfg["token"]:
+        raise HTTPException(400, f"'{label}' isn't an active WhatsApp number in Settings.")
+    return cfg
+
+
+def clean_recipient(to: str) -> str:
+    to = re.sub(r"\D", "", to or "")
+    if not 8 <= len(to) <= 15:
+        raise HTTPException(400, "Enter the customer's number with country code, e.g. 919876543210.")
+    return to
+
+
+def render_template_text(text: str, names: List[str], values: List[str]) -> str:
+    lookup = dict(zip(names, values))
+    return PLACEHOLDER_RE.sub(lambda m: lookup.get(m.group(1), m.group(0)), text or "")
+
+
+def clean_param(value: str) -> str:
+    # WhatsApp rejects variables with new lines, tabs or runs of spaces
+    return " ".join(str(value or "").split())[:1024]
+
+
+class TemplateSendIn(BaseModel):
+    number_label: str
+    to: str
+    name: str = Field(..., min_length=1, max_length=512)
+    language: str = Field(..., min_length=1, max_length=20)
+    header_params: List[str] = Field(default_factory=list, max_length=10)
+    body_params: List[str] = Field(default_factory=list, max_length=60)
+    order_id: Optional[str] = None  # Charm.Studio order to mark as confirmed
+
+
+@api.get("/inbox/templates")
+async def inbox_templates(number: str, refresh: bool = False):
+    cfg = sending_number(number)
+    return {"templates": await number_templates(cfg, refresh), "settings": SETTINGS.get("templates", {})}
+
+
+@api.post("/inbox/send-template")
+async def inbox_send_template(payload: TemplateSendIn):
+    cfg = sending_number(payload.number_label)
+    to = clean_recipient(payload.to)
+
+    def find(templates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        return next((t for t in templates if t["name"] == payload.name and t["language"] == payload.language), None)
+
+    tpl = find(await number_templates(cfg)) or find(await number_templates(cfg, refresh=True))
+    if not tpl:
+        raise HTTPException(404, f"Template '{payload.name}' ({payload.language}) wasn't found on {cfg['label']}.")
+    if not tpl["sendable"]:
+        raise HTTPException(400, f"'{tpl['name']}' can't be sent from Charm.Studio: {tpl['problem']}.")
+    header_vals = [clean_param(v) for v in payload.header_params]
+    body_vals = [clean_param(v) for v in payload.body_params]
+    if len(header_vals) != len(tpl["header_params"]) or len(body_vals) != len(tpl["body_params"]):
+        raise HTTPException(400, "The template changed. Reload it and fill in the blanks again.")
+    missing = [n for n, v in zip(tpl["header_params"] + tpl["body_params"], header_vals + body_vals) if not v]
+    if missing:
+        raise HTTPException(400, "Fill in every blank: " + ", ".join("{{%s}}" % n for n in missing))
+
+    def params(names: List[str], values: List[str]) -> List[Dict[str, str]]:
+        return [{"type": "text", "text": v, **({"parameter_name": n} if tpl["named"] else {})} for n, v in zip(names, values)]
+
+    components = []
+    if header_vals:
+        components.append({"type": "header", "parameters": params(tpl["header_params"], header_vals)})
+    if body_vals:
+        components.append({"type": "body", "parameters": params(tpl["body_params"], body_vals)})
+    template: Dict[str, Any] = {"name": tpl["name"], "language": {"code": tpl["language"]}}
+    if components:
+        template["components"] = components
+    text = render_template_text(tpl["body"], tpl["body_params"], body_vals)
+    if tpl["header"]:
+        text = render_template_text(tpl["header"], tpl["header_params"], header_vals) + "\n\n" + text
+    if tpl["footer"]:
+        text += "\n\n" + tpl["footer"]
+    try:
+        resp = await send_payload(
+            cfg, to, {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to,
+                      "type": "template", "template": template},
+            kind="template", text=text, source="staff",
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Could not reach WhatsApp: {e}")
+    if resp.status_code >= 300:
+        raise HTTPException(502, f"WhatsApp didn't accept the template: {_api_error(resp)}")
+    order = None
+    if payload.order_id:
+        row = await db().fetchrow(f"UPDATE orders SET confirmed_at = now() WHERE id = $1 RETURNING {ORDER_SELECT}", payload.order_id)
+        order = row_dict(row)
+    return {**await _thread(cfg["logical_id"], to), "order": order}
 
 
 # ---------------------------------------------------------------------------
@@ -2335,6 +2555,30 @@ async def save_bot_settings(payload: BotSettingsIn):
 @api.put("/settings/labels")
 async def save_label_settings(payload: LabelSettingsIn):
     return await _save_section("labels", payload.model_dump())
+
+class TemplateRef(BaseModel):
+    name: str = Field("", max_length=512)
+    language: str = Field("", max_length=20)
+
+
+class TemplateMap(BaseModel):
+    header: List[str] = Field(default_factory=list, max_length=10)
+    body: List[str] = Field(default_factory=list, max_length=60)
+
+
+class TemplateSettingsIn(BaseModel):
+    confirmation: TemplateRef = Field(default_factory=TemplateRef)
+    maps: Dict[str, TemplateMap] = Field(default_factory=dict, max_length=100)
+
+
+@api.put("/settings/templates")
+async def save_template_settings(payload: TemplateSettingsIn):
+    value = payload.model_dump()
+    for m in value["maps"].values():
+        m["header"] = [str(x)[:300] for x in m["header"]]
+        m["body"] = [str(x)[:300] for x in m["body"]]
+    return await _save_section("templates", value)
+
 
 
 @api.get("/system/status")

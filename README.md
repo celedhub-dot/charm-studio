@@ -6,8 +6,8 @@ Charm.Studio is for a small seller who takes customised-charm orders on WhatsApp
 
 ## Features
 
-- **Chats (team inbox):** every customer chat from your WhatsApp numbers in one place. Search by phone, name, order ID or anything the customer wrote. Each chat shows the orders the bot saved for that customer, which staff can edit, and staff reply from the app through the business number (WhatsApp allows free-form replies within 24 hours of the customer's last message). Messages your team sends from the WhatsApp Business phone app show up too (coexistence). One shared login.
-- **Orders:** add, search (also by customer phone), edit and delete orders inline; import and export CSV; delete all (with confirmation). **Order sheet PDF:** a printable table of every order received today, yesterday or in a date range.
+- **Chats (team inbox):** every customer chat from your WhatsApp numbers in one place. Search by phone, name, order ID or anything the customer wrote. Each chat shows the orders the bot saved for that customer, which staff can edit, and staff reply from the app through the business number (WhatsApp allows free-form replies within 24 hours of the customer's last message; after that, or to start a chat, staff send an approved **template**). Messages your team sends from the WhatsApp Business phone app show up too (coexistence). One shared login.
+- **Orders:** add, search (also by customer phone), edit and delete orders inline; import and export CSV; delete all (with confirmation). **Order sheet PDF:** a printable table of every order received today, yesterday or in a date range. **Send confirmation:** sends your approved order-confirmation template on WhatsApp, filled in from the order, and marks the order confirmed.
 - **WhatsApp Extract:** paste chat text, or upload an exported chat `.txt`, and AI turns it into orders you can edit before saving. Large chats are split into chunks and duplicates are merged.
 - **Label Studio:** drop in a label PDF and see each page's detected Order ID and matched order. Fix unmatched pages by hand, then download a copy with a small customisation sticker in a corner of each label, away from the barcode.
 - **WhatsApp Bot:** each number has a bot mode. **Read only** quietly reads every chat and saves the order ID, name, charm and notes it finds, never messaging customers (use this when staff also chat on the number). **Ask questions** has the bot ask the customer step by step. **Off** just stores messages for Chats. Supports several numbers, connected directly through Meta or through 360dialog.
@@ -138,6 +138,17 @@ Use this when the number is also used in the WhatsApp Business phone app, so the
 
 **AI cost:** for reading chats, Claude Haiku is the cheapest option that works well. Set `ANTHROPIC_MODEL=claude-haiku-5-5` on Render. At roughly 1,500 messages a day this costs about ₹10 a day.
 
+### Order confirmations and other templates
+
+WhatsApp only allows typed replies within 24 hours of the customer's last message. After that (for example, an order confirmation a few days later), you must send a **template**: a message Meta has approved in advance, with blanks like `{{1}}` that are filled in per customer. Meta charges a small fee for each one.
+
+1. Create the template in Meta's **WhatsApp Manager** (or the 360dialog Hub for 360dialog numbers). Choose category **Utility** for order updates, e.g. *Hi {{1}}, your order {{2}} with the name "{{3}}" and {{4}} charm is confirmed.* Wait for approval.
+2. Meta numbers only: in **Settings → WhatsApp numbers → Edit**, fill in the **WhatsApp Business Account ID** (WhatsApp Manager shows it). 360dialog numbers need nothing extra.
+3. Send it from **Orders** (the paper-plane button on an order with a phone number), from an order card in **Chats** ("Send confirmation"), or from a chat with the **Send template** button.
+4. Pick which order field fills each blank (customer name, order ID, name on product, charm, notes, shop name). Charm.Studio remembers the choice per template, and remembers which template "Send confirmation" uses.
+
+Templates with image/video/document headers or link buttons that contain a variable are listed but can't be sent from Charm.Studio yet.
+
 ## API summary
 
 | Method | Path | Purpose |
@@ -159,6 +170,9 @@ Use this when the number is also used in the WhatsApp Business phone app, so the
 | POST | `/api/inbox/conversations/{number}/{phone}/read-orders` | have the bot read the chat again now |
 | POST | `/api/inbox/send` | staff reply (409 when the 24-hour window is closed) |
 | GET | `/api/inbox/unread` | unread chat count for the nav badge |
+| GET | `/api/inbox/templates?number=` | the number's templates (`refresh=true` reloads from WhatsApp) and the remembered settings |
+| POST | `/api/inbox/send-template` | send an approved template (any time); `order_id` marks that order confirmed |
+| PUT | `/api/settings/templates` | which template "Send confirmation" uses and which field fills each blank |
 | GET | `/api/orders/sheet.pdf` | order sheet PDF (`start`, `end` ISO times, `tz` minutes, `title`; up to 93 days) |
 | GET | `/api/wa/status`, `/api/wa/numbers`, `/api/wa/conversations` | bot status |
 | POST | `/api/wa/test-send` | send a test message |
@@ -193,6 +207,13 @@ cd backend
 ```bash
 cd backend
 .venv/Scripts/python.exe tests/test_inbox.py
+```
+
+`backend/tests/test_templates.py` covers templates in a `charm_test_templates` schema: loading and checking templates (positional and named blanks, unapproved, image headers, link buttons), the WhatsApp Business Account ID for Meta numbers, sending after the 24-hour window, marking orders confirmed, errors from WhatsApp, and the remembered settings.
+
+```bash
+cd backend
+.venv/Scripts/python.exe tests/test_templates.py
 ```
 
 ## Notes

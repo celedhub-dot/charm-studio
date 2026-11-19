@@ -106,6 +106,7 @@ notes         text                       started_at         timestamptz
 source        text  manual|ai|csv|whatsapp  updated_at      timestamptz
 channel       text  (WA number name)
 customer_phone text (digits only; links to Chats)
+confirmed_at  timestamptz (last confirmation template sent)
 created_at    timestamptz
 ```
 
@@ -128,7 +129,7 @@ error, created_at
 
 - `wa_messages` is every message in and out, including replies sent from the WhatsApp Business phone app (coexistence `smb_message_echoes`). Status updates only move forward (`sent → delivered → read`, or `failed`).
 - `wa_contacts` is one row per chat, for the Chats list. `last_inbound_at` drives the 24-hour reply window.
-- `wa_numbers` also has `provider` (`meta` | `360dialog`), `bot_mode` (`ask` | `read` | `off`) and `webhook_key` (the secret in a 360dialog number's webhook URL). Deleting a number keeps its message history.
+- `wa_numbers` also has `provider` (`meta` | `360dialog`), `bot_mode` (`ask` | `read` | `off`), `webhook_key` (the secret in a 360dialog number's webhook URL) and `waba_id` (Meta only: the WhatsApp Business Account that owns the number's templates). Deleting a number keeps its message history.
 
 ```
 account (1 row)               wa_numbers                         app_settings          login_events        password_resets
@@ -280,7 +281,9 @@ Routing is by `phone_number_id` only, so several business numbers can share one 
 
 **360dialog.** Same message JSON as Meta, sent to `D360_BASE_URL` (`https://waba-v2.360dialog.io`) `/messages` with a `D360-API-KEY` header. Its webhooks aren't signed, so each number gets `POST /api/wa/webhook/n/{number_id}/{webhook_key}` with a random key; adding a number sets it through `POST /v1/configs/webhook`. Payloads use Meta's `entry[].changes[].value` shape; a flat `value` is accepted too.
 
-**Chats (inbox).** `/api/inbox/*` reads `wa_contacts` and `wa_messages`. Staff replies go through `send_wa(..., source="staff")` and are refused with 409 outside the 24-hour window (templates aren't supported yet). The frontend polls: the chat list every 5 s, an open chat every 4 s, the unread badge every 15 s.
+**Chats (inbox).** `/api/inbox/*` reads `wa_contacts` and `wa_messages`. Staff replies go through `send_wa(..., source="staff")` and are refused with 409 outside the 24-hour window.
+
+**Templates.** `GET /api/inbox/templates` loads the number's templates (Meta: `GET /{waba_id}/message_templates`; 360dialog: `GET /v1/configs/templates`), cached 5 minutes per number. `normalize_template` keeps the text header, body, footer and button labels, lists the blanks (`{{1}}` positional or `{{name}}` named), and marks a template unsendable if it isn't approved, has a media header, or has a link button with a variable. `POST /api/inbox/send-template` checks every blank is filled (WhatsApp rejects new lines in variables, so whitespace is collapsed), sends `type: template` through `send_payload` (which records it in `wa_messages` with `kind = template` and the filled-in text), and sets `orders.confirmed_at` when an `order_id` is given. Templates don't reopen the 24-hour window. Which order field fills each blank is chosen in the browser and remembered in `app_settings.templates` (`maps["name|language"]`); typed text is never remembered as-is. The frontend polls: the chat list every 5 s, an open chat every 4 s, the unread badge every 15 s.
 
 Numbers are managed in Settings (`/api/wa/numbers`). Adding a number or changing its token or phone ID first calls `GET graph.facebook.com/{version}/{phone_id}` with the token. A rejection returns **424**, and the UI offers "Save anyway" (`skip_check`). The check also fills in the display number.
 
