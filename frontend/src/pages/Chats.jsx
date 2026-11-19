@@ -20,11 +20,14 @@ import {
   Plus,
   FileText,
   SealCheck,
+  Paperclip,
+  X,
 } from "@phosphor-icons/react";
 import {
   getConversations,
   getThread,
   sendInboxMessage,
+  sendInboxMedia,
   readOrdersAgain,
   updateOrder,
   createOrder,
@@ -37,6 +40,7 @@ import { Button } from "../components/ui/button";
 import { EmptyState, SourceBadge } from "../components/common";
 import { cn, timeAgo } from "../lib/utils";
 import TemplateDialog from "../components/TemplateDialog";
+import MessageMedia, { fmtSize } from "../components/MessageMedia";
 
 const ORDER_FIELDS = ["order_id", "product_name", "charm", "notes"];
 const fmtPhone = (p) => (p ? `+${p}` : "");
@@ -180,8 +184,17 @@ function MessageList({ messages }) {
                     <src.icon size={11} /> {src.label}
                   </div>
                 )}
-                {m.kind !== "text" && <div className="mb-0.5 text-[11px] font-medium uppercase text-muted">[{m.kind}]</div>}
-                <div className="whitespace-pre-wrap break-words">{m.body || (m.kind === "text" ? "" : "(no text)")}</div>
+                {m.media_id ? (
+                  <div className={m.body && m.body !== m.media_name ? "mb-1" : ""}>
+                    <MessageMedia m={m} />
+                  </div>
+                ) : (
+                  !["text", "template"].includes(m.kind) && <div className="mb-0.5 text-[11px] font-medium uppercase text-muted">[{m.kind}]</div>
+                )}
+                {m.kind === "template" && <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">Template</div>}
+                {(!m.media_id || (m.body && m.body !== m.media_name)) && (
+                  <div className="whitespace-pre-wrap break-words">{m.body || (m.media_id || m.kind === "text" ? "" : "(no text)")}</div>
+                )}
                 <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-muted">
                   {fmtTime(m.created_at)}
                   {out && <StatusTick m={m} />}
@@ -353,6 +366,16 @@ function OrdersPanel({ thread, onChanged, onConfirm }) {
 function Thread({ sel, onBack, onSent }) {
   const [thread, setThread] = useState(null);
   const [text, setText] = useState("");
+  const [file, setFile] = useState(null); // attachment waiting to be sent
+  const [filePreview, setFilePreview] = useState("");
+  const fileInput = useRef(null);
+
+  useEffect(() => {
+    if (!file || !file.type.startsWith("image/")) return setFilePreview("");
+    const url = URL.createObjectURL(file);
+    setFilePreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
   const [sending, setSending] = useState(false);
   const [showOrders, setShowOrders] = useState(false);
   const [tplFor, setTplFor] = useState(null); // { order, confirmation } while the template dialog is open
@@ -368,6 +391,7 @@ function Thread({ sel, onBack, onSent }) {
   useEffect(() => {
     setThread(null);
     setText("");
+    setFile(null);
     load();
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
@@ -386,14 +410,26 @@ function Thread({ sel, onBack, onSent }) {
   const left = hoursLeft(contact.window_closes_at);
   const canReply = contact.window_open && number.can_send;
 
+  const pickFile = (f) => {
+    if (!f) return;
+    const limit = f.type.startsWith("image/") ? 5 : 16;
+    if (f.size > limit * 1024 * 1024) return toast.error(`That file is ${fmtSize(f.size)}. WhatsApp allows up to ${limit} MB for this type.`);
+    setFile(f);
+  };
+
   const send = async (e) => {
     e?.preventDefault();
     const body = text.trim();
-    if (!body) return;
+    if (!body && !file) return;
     setSending(true);
     try {
-      setThread(await sendInboxMessage(contact.number_label, contact.customer_phone, body));
+      setThread(
+        file
+          ? await sendInboxMedia(contact.number_label, contact.customer_phone, file, body)
+          : await sendInboxMessage(contact.number_label, contact.customer_phone, body)
+      );
       setText("");
+      setFile(null);
       onSent();
     } catch (err) {
       toast.error(errorMessage(err));
@@ -447,11 +483,58 @@ function Thread({ sel, onBack, onSent }) {
               </Button>
             </div>
           ) : null}
+          {file && (
+            <div className="mb-2 flex items-center gap-3 rounded-lg border border-line bg-cream/60 p-2" data-testid="attachment-chip">
+              {filePreview ? (
+                <img src={filePreview} alt="" className="h-12 w-12 rounded object-cover" />
+              ) : (
+                <FileText size={28} className="text-forest" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium">{file.name}</div>
+                <div className="text-xs text-muted">
+                  {fmtSize(file.size)} · {file.type.startsWith("audio/") ? "voice notes and audio can't have a caption" : "the text box is the caption"}
+                </div>
+              </div>
+              <button type="button" className="rounded-md p-1 text-muted hover:bg-sand" onClick={() => setFile(null)} aria-label="Remove attachment" data-testid="attachment-remove">
+                <X size={16} />
+              </button>
+            </div>
+          )}
           <div className="mt-1 flex items-end gap-2">
+            <input
+              ref={fileInput}
+              type="file"
+              className="hidden"
+              accept="image/jpeg,image/png,video/mp4,video/3gpp,audio/aac,audio/mp4,audio/mpeg,audio/amr,audio/ogg,application/pdf,text/plain,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+              onChange={(e) => {
+                pickFile(e.target.files?.[0]);
+                e.target.value = "";
+              }}
+              data-testid="attach-input"
+            />
+            {canReply && (
+              <Button type="button" variant="outline" onClick={() => fileInput.current?.click()} title="Attach a photo or file" aria-label="Attach a photo or file" data-testid="attach-btn">
+                <Paperclip size={16} />
+              </Button>
+            )}
             <Textarea
               data-testid="reply-input"
               rows={1}
-              placeholder={canReply ? "Type a reply… (Enter to send, Shift+Enter for a new line)" : "Replies are disabled for this chat"}
+              onPaste={(e) => {
+                const f = [...(e.clipboardData?.files || [])][0];
+                if (f && canReply) {
+                  e.preventDefault();
+                  pickFile(f);
+                }
+              }}
+              placeholder={
+                canReply
+                  ? file
+                    ? "Add a caption (optional)…"
+                    : "Type a reply… (Enter to send, Shift+Enter for a new line)"
+                  : "Replies are disabled for this chat"
+              }
               disabled={!canReply || sending}
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -475,7 +558,7 @@ function Thread({ sel, onBack, onSent }) {
                 <FileText size={16} />
               </Button>
             )}
-            <Button type="submit" disabled={!canReply || sending || !text.trim()} data-testid="reply-send-btn" aria-label="Send">
+            <Button type="submit" disabled={!canReply || sending || (!text.trim() && !file)} data-testid="reply-send-btn" aria-label="Send">
               {sending ? <Spinner /> : <PaperPlaneRight size={16} weight="fill" />}
             </Button>
           </div>

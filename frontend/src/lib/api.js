@@ -130,6 +130,16 @@ export const getUnread = () => api.get("/inbox/unread").then((r) => r.data);
 export const getTemplates = (number, refresh = false) =>
   api.get("/inbox/templates", { params: { number, refresh: refresh || undefined } }).then((r) => r.data);
 export const sendTemplate = (data) => api.post("/inbox/send-template", data).then((r) => r.data);
+export const getMediaBlob = (messageId) =>
+  api.get(`/inbox/media/${encodeURIComponent(messageId)}`, { responseType: "blob" }).then((r) => r.data);
+export const sendInboxMedia = (numberLabel, to, file, caption) => {
+  const form = new FormData();
+  form.append("number_label", numberLabel);
+  form.append("to", to);
+  form.append("caption", caption || "");
+  form.append("file", file);
+  return api.post("/inbox/send-media", form).then((r) => r.data);
+};
 
 // Order sheet PDF for a period (start/end are Date objects in the user's local time)
 export const downloadOrderSheet = async (start, end, title) => {

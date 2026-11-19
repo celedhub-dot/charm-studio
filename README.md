@@ -6,7 +6,7 @@ Charm.Studio is for a small seller who takes customised-charm orders on WhatsApp
 
 ## Features
 
-- **Chats (team inbox):** every customer chat from your WhatsApp numbers in one place. Search by phone, name, order ID or anything the customer wrote. Each chat shows the orders the bot saved for that customer, which staff can edit, and staff reply from the app through the business number (WhatsApp allows free-form replies within 24 hours of the customer's last message; after that, or to start a chat, staff send an approved **template**). Messages your team sends from the WhatsApp Business phone app show up too (coexistence). One shared login.
+- **Chats (team inbox):** every customer chat from your WhatsApp numbers in one place. Search by phone, name, order ID or anything the customer wrote. Each chat shows the orders the bot saved for that customer, which staff can edit, and staff reply from the app through the business number (WhatsApp allows free-form replies within 24 hours of the customer's last message; after that, or to start a chat, staff send an approved **template**). Customers' photos, voice notes, videos, stickers and files show in the chat, and staff can send photos, PDFs and other files (paperclip button, or paste an image). Messages your team sends from the WhatsApp Business phone app show up too (coexistence). One shared login.
 - **Orders:** add, search (also by customer phone), edit and delete orders inline; import and export CSV; delete all (with confirmation). **Order sheet PDF:** a printable table of every order received today, yesterday or in a date range. **Send confirmation:** sends your approved order-confirmation template on WhatsApp, filled in from the order, and marks the order confirmed.
 - **WhatsApp Extract:** paste chat text, or upload an exported chat `.txt`, and AI turns it into orders you can edit before saving. Large chats are split into chunks and duplicates are merged.
 - **Label Studio:** drop in a label PDF and see each page's detected Order ID and matched order. Fix unmatched pages by hand, then download a copy with a small customisation sticker in a corner of each label, away from the barcode.
@@ -169,6 +169,8 @@ Templates with image/video/document headers or link buttons that contain a varia
 | GET | `/api/inbox/conversations/{number}/{phone}` | one chat: messages, contact, orders; marks it read |
 | POST | `/api/inbox/conversations/{number}/{phone}/read-orders` | have the bot read the chat again now |
 | POST | `/api/inbox/send` | staff reply (409 when the 24-hour window is closed) |
+| GET | `/api/inbox/media/{message_id}` | the photo/voice note/file on a message (fetched from WhatsApp, cached briefly) |
+| POST | `/api/inbox/send-media` | staff send a file (multipart: `number_label`, `to`, `caption`, `file`); same 24-hour rule |
 | GET | `/api/inbox/unread` | unread chat count for the nav badge |
 | GET | `/api/inbox/templates?number=` | the number's templates (`refresh=true` reloads from WhatsApp) and the remembered settings |
 | POST | `/api/inbox/send-template` | send an approved template (any time); `order_id` marks that order confirmed |
@@ -216,10 +218,18 @@ cd backend
 .venv/Scripts/python.exe tests/test_templates.py
 ```
 
+`backend/tests/test_media.py` covers photos, voice notes and files (`charm_test_media` schema): receiving them, showing them for both 360dialog and Meta numbers, expired files, phone-app echoes, sending files, size and type limits and the 24-hour rule. WhatsApp is replaced by a fake HTTP transport, so the real download/upload code runs.
+
+```bash
+cd backend
+.venv/Scripts/python.exe tests/test_media.py
+```
+
 ## Notes
 
 - **AI provider** (`AI_PROVIDER`):
   - `anthropic` (default): `claude-sonnet-5-5` with server-side refusal fallbacks turned on (`fallbacks: "default"`). Set `ANTHROPIC_MODEL` to use a different model; `claude-haiku-5-5` is the cheapest choice for reading chats. The key comes from platform.claude.com and is billed separately from a Claude Pro subscription.
   - `ollama`: Ollama's Anthropic-compatible endpoint. Set `OLLAMA_API_KEY` and `OLLAMA_MODEL`. `OLLAMA_BASE_URL` defaults to Ollama Cloud (`https://ollama.com`); point it at `http://localhost:11434` for a local server, which needs no key. Open models can be less consistent at returning clean JSON, so review the preview table before saving.
+- **Media in Chats:** WhatsApp keeps customers' files for about 30 days. Charm.Studio stores only the file's id and fetches it when someone opens the chat, so older photos show "no longer available". Download anything you need to keep. Sending limits: photos (JPG/PNG) 5 MB; videos, audio and documents (PDF, Word, Excel, PowerPoint, text) 16 MB.
 - Stickers use Helvetica (a built-in PDF font). It cannot draw non-Latin scripts such as Devanagari, so write those names in Latin letters.
 - Order matching: IDs are compared after removing non-alphanumerics and uppercasing. Two IDs match if they are equal, or if the shorter one is at least 8 characters long and shares an 8-character run with the longer one.

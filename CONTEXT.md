@@ -104,6 +104,7 @@ These came from the original spec. Keep them unless there's a good reason to cha
 - No real AI call has been made yet: no `ANTHROPIC_API_KEY` or Ollama key is configured.
 - The WhatsApp bot hasn't been tested against a real Meta or 360dialog number yet (none added).
 - The main number 83390 39324 had a temporary WhatsApp restriction (several staff on WhatsApp Web). Plan: once it lifts, connect it to 360dialog with coexistence and add it in Settings as a 360dialog number in Read-only mode, so staff chat in Charm.Studio instead of WhatsApp Web.
+- Photos, voice notes and files in Chats pass 23 automated checks (`tests/test_media.py`) and were clicked through against a local fake 360dialog (photo with caption shown, PDF card, staff photo sent with caption).
 - Templates (order confirmations after the 24-hour window) pass 41 automated checks (`tests/test_templates.py`) and were clicked through against a local fake 360dialog. No real template has been sent yet: one must first be created and approved in WhatsApp Manager or the 360dialog Hub.
 - No real Meesho or Flipkart label PDF has been tried yet; only generated test PDFs.
 

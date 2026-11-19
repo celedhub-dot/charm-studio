@@ -116,6 +116,10 @@ CREATE TABLE IF NOT EXISTS wa_messages (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS wa_messages_wamid_idx ON wa_messages (wa_message_id) WHERE wa_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS wa_messages_thread_idx ON wa_messages (number_label, customer_phone, created_at DESC);
+-- Photos, voice notes, videos and files: WhatsApp keeps the file; we keep its id and fetch it when shown.
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS media_id   text NOT NULL DEFAULT '';
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS media_mime text NOT NULL DEFAULT '';
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS media_name text NOT NULL DEFAULT '';
 
 -- One row per customer per number: what the Chats list shows.
 CREATE TABLE IF NOT EXISTS wa_contacts (

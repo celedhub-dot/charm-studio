@@ -17,6 +17,7 @@ import re
 import secrets
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1472,18 +1473,26 @@ async def record_message(
     error: str = "",
     name: str = "",
     at: Optional[datetime] = None,
+    media: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Store one message and update the Chats list. Returns None for a duplicate WhatsApp message id."""
     at = at or now_utc()
+    media = media or {}
     row = await db().fetchrow(
         "INSERT INTO wa_messages (id, number_label, customer_phone, direction, kind, body, wa_message_id, "
-        "status, source, error, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) "
-        "ON CONFLICT DO NOTHING RETURNING *",
+        "status, source, error, created_at, media_id, media_mime, media_name) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT DO NOTHING RETURNING *",
         str(uuid.uuid4()), label, phone, direction, kind, body[:4096], wa_message_id, status, source, error[:300], at,
+        media.get("media_id", ""), media.get("media_mime", ""), media.get("media_name", ""),
     )
     if not row:
         return None
-    preview = (("You: " if direction == "out" else "") + (body or f"[{kind}]")).replace("\n", " ")[:120]
+    label_for = {"image": "Photo", "video": "Video", "audio": "Voice note", "document": "File", "sticker": "Sticker",
+                 "location": "Location", "template": "Template"}
+    shown = body if kind != "document" else (body or media.get("media_name", ""))
+    if kind in label_for and kind != "template":
+        shown = f"[{label_for[kind]}] {shown}".strip()
+    preview = (("You: " if direction == "out" else "") + (shown or f"[{kind}]")).replace("\n", " ")[:120]
     await db().execute(
         """
         INSERT INTO wa_contacts (number_label, customer_phone, name, last_preview, last_message_at, last_inbound_at, unread)
@@ -1510,7 +1519,10 @@ async def send_wa(cfg: Dict[str, Any], to: str, text: str, source: str = "bot") 
     return await send_payload(cfg, to, body, kind="text", text=text, source=source)
 
 
-async def send_payload(cfg: Dict[str, Any], to: str, body: Dict[str, Any], kind: str, text: str, source: str) -> httpx.Response:
+async def send_payload(
+    cfg: Dict[str, Any], to: str, body: Dict[str, Any], kind: str, text: str, source: str,
+    media: Optional[Dict[str, str]] = None,
+) -> httpx.Response:
     """Send one message and record it in Chats (as sent or failed)."""
     resp = await wa_post(cfg, "messages", body)
     wamid, error = None, ""
@@ -1523,7 +1535,8 @@ async def send_payload(cfg: Dict[str, Any], to: str, body: Dict[str, Any], kind:
         error = _api_error(resp)
         log.warning("WhatsApp send failed (%s): %s", resp.status_code, resp.text[:500])
     try:
-        await record_message(cfg["logical_id"], to, "out", kind, text, wamid, "sent" if resp.status_code < 300 else "failed", source, error)
+        await record_message(cfg["logical_id"], to, "out", kind, text, wamid, "sent" if resp.status_code < 300 else "failed",
+                             source, error, media=media)
     except Exception:  # noqa: BLE001
         log.exception("Could not record outgoing message")
     return resp
@@ -1757,10 +1770,13 @@ async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
         customer = msg.get("from", "")
         kind, text = message_content(msg)
         await record_message(label, customer, "in", kind, text, msg["id"], "received", "customer",
-                             name=names.get(customer, ""), at=_msg_time(msg))
+                             name=names.get(customer, ""), at=_msg_time(msg), media=message_media(msg))
+        mode = cfg.get("bot_mode") or "ask"
+        if mode == "read" and kind in ("image", "video", "document") and text.strip():
+            schedule_read(label, customer)  # a photo's caption can carry the order details
+            continue
         if kind != "text" or not text.strip():
             continue
-        mode = cfg.get("bot_mode") or "ask"
         try:
             if mode == "ask":
                 await handle_bot_message(cfg, customer, text)
@@ -1771,7 +1787,7 @@ async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
     for echo in value.get("message_echoes") or []:  # coexistence: sent from the WhatsApp Business app
         kind, text = message_content(echo)
         await record_message(label, echo.get("to", ""), "out", kind, text, echo.get("id"), "sent", "phone_app",
-                             at=_msg_time(echo))
+                             at=_msg_time(echo), media=message_media(echo))
     for st in value.get("statuses") or []:
         status = st.get("status") or ""
         if status not in STATUS_ORDER or not st.get("id"):
@@ -2288,10 +2304,7 @@ async def inbox_read_orders(label: str, phone: str):
     return {**result, "ai_ready": ai_ready()}
 
 
-@api.post("/inbox/send")
-async def inbox_send(payload: InboxSendIn):
-    cfg = sending_number(payload.number_label)
-    to = clean_recipient(payload.to)
+async def ensure_reply_window(cfg: Dict[str, Any], to: str) -> None:
     last_in = await db().fetchval(
         "SELECT last_inbound_at FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", cfg["logical_id"], to
     )
@@ -2301,6 +2314,13 @@ async def inbox_send(payload: InboxSendIn):
             "WhatsApp only allows typed replies within 24 hours of the customer's last message. "
             "This customer hasn't messaged in the last 24 hours, so send an approved template instead.",
         )
+
+
+@api.post("/inbox/send")
+async def inbox_send(payload: InboxSendIn):
+    cfg = sending_number(payload.number_label)
+    to = clean_recipient(payload.to)
+    await ensure_reply_window(cfg, to)
     try:
         resp = await send_wa(cfg, to, payload.text.strip(), source="staff")
     except httpx.HTTPError as e:
@@ -2508,6 +2528,171 @@ async def inbox_send_template(payload: TemplateSendIn):
         row = await db().fetchrow(f"UPDATE orders SET confirmed_at = now() WHERE id = $1 RETURNING {ORDER_SELECT}", payload.order_id)
         order = row_dict(row)
     return {**await _thread(cfg["logical_id"], to), "order": order}
+
+
+# ---------------------------------------------------------------------------
+# Media: photos, voice notes, videos, stickers and files in Chats
+# ---------------------------------------------------------------------------
+MEDIA_KINDS = ("image", "video", "audio", "document", "sticker")
+MEDIA_MAX_FETCH = 25 * 1024 * 1024
+MEDIA_CACHE: "OrderedDict[str, tuple]" = OrderedDict()  # media id -> (bytes, mime); small in-memory cache
+MEDIA_CACHE_LIMIT = 40 * 1024 * 1024
+
+# What staff can send, by type: (WhatsApp message type, size limit). WhatsApp's own limits, capped at 16 MB.
+SEND_TYPES = {
+    "image/jpeg": ("image", 5), "image/png": ("image", 5),
+    "video/mp4": ("video", 16), "video/3gpp": ("video", 16),
+    "audio/aac": ("audio", 16), "audio/mp4": ("audio", 16), "audio/mpeg": ("audio", 16),
+    "audio/amr": ("audio", 16), "audio/ogg": ("audio", 16),
+    "application/pdf": ("document", 16), "text/plain": ("document", 16),
+    "application/msword": ("document", 16), "application/vnd.ms-excel": ("document", 16),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ("document", 16),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ("document", 16),
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ("document", 16),
+}
+
+
+def message_media(msg: Dict[str, Any]) -> Dict[str, str]:
+    """The media fields of an incoming/echoed message, or empty strings."""
+    t = msg.get("type")
+    if t not in MEDIA_KINDS:
+        return {"media_id": "", "media_mime": "", "media_name": ""}
+    m = msg.get(t) or {}
+    return {
+        "media_id": str(m.get("id") or ""),
+        "media_mime": str(m.get("mime_type") or "").split(";")[0].strip(),
+        "media_name": str(m.get("filename") or "")[:200],
+    }
+
+
+def _cache_media(media_id: str, data: bytes, mime: str) -> None:
+    MEDIA_CACHE[media_id] = (data, mime)
+    MEDIA_CACHE.move_to_end(media_id)
+    while sum(len(v[0]) for v in MEDIA_CACHE.values()) > MEDIA_CACHE_LIMIT and len(MEDIA_CACHE) > 1:
+        MEDIA_CACHE.popitem(last=False)
+
+
+async def fetch_media(cfg: Dict[str, Any], media_id: str) -> tuple:
+    """Download a media file from WhatsApp. Returns (bytes, mime). Raises HTTPException."""
+    d360 = cfg.get("provider") == "360dialog"
+    headers = {"D360-API-KEY": cfg["token"] or ""} if d360 else {"Authorization": f"Bearer {cfg['token']}"}
+    info_url = f"{D360_BASE}/{media_id}" if d360 else f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{media_id}"
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            info = await client.get(info_url, headers=headers)
+            if info.status_code in (400, 404):
+                raise HTTPException(410, "WhatsApp no longer has this file (files are kept for about 30 days).")
+            if info.status_code >= 300:
+                raise HTTPException(502, f"WhatsApp didn't give the file: {_api_error(info)}")
+            meta = info.json()
+            url = str(meta.get("url") or "")
+            if not url:
+                raise HTTPException(410, "WhatsApp no longer has this file.")
+            if d360:  # 360dialog proxies Meta's media host
+                url = re.sub(r"^https://lookaside\.fbsbx\.com", D360_BASE, url)
+            if int(meta.get("file_size") or 0) > MEDIA_MAX_FETCH:
+                raise HTTPException(413, "This file is too big to show here.")
+            resp = await client.get(url, headers=headers)
+    except httpx.HTTPError:
+        raise HTTPException(502, "Couldn't reach WhatsApp to get the file. Try again.")
+    if resp.status_code >= 300:
+        raise HTTPException(410 if resp.status_code == 404 else 502, "WhatsApp didn't give the file.")
+    mime = str(meta.get("mime_type") or resp.headers.get("content-type") or "application/octet-stream").split(";")[0]
+    return resp.content, mime
+
+
+async def wa_upload(cfg: Dict[str, Any], data: bytes, mime: str, filename: str) -> str:
+    """Upload a file to WhatsApp for sending. Returns the media id. Raises HTTPException."""
+    d360 = cfg.get("provider") == "360dialog"
+    if d360:
+        url, headers = f"{D360_BASE}/media", {"D360-API-KEY": cfg["token"] or ""}
+    else:
+        url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{cfg['phone_id']}/media"
+        headers = {"Authorization": f"Bearer {cfg['token']}"}
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, data={"messaging_product": "whatsapp", "type": mime},
+                                     files={"file": (filename, data, mime)})
+    except httpx.HTTPError:
+        raise HTTPException(502, "Couldn't reach WhatsApp to upload the file. Try again.")
+    if resp.status_code >= 300:
+        raise HTTPException(502, f"WhatsApp didn't accept the file: {_api_error(resp)}")
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    media_id = body.get("id") or ((body.get("media") or [{}])[0] or {}).get("id")
+    if not media_id:
+        raise HTTPException(502, "WhatsApp didn't return an id for the uploaded file.")
+    return str(media_id)
+
+
+@api.get("/inbox/media/{message_id}")
+async def inbox_media(message_id: str):
+    row = await db().fetchrow("SELECT number_label, media_id, media_mime, media_name FROM wa_messages WHERE id = $1", message_id)
+    if not row or not row["media_id"]:
+        raise HTTPException(404, "No file on this message.")
+    cached = MEDIA_CACHE.get(row["media_id"])
+    if cached:
+        data, mime = cached
+        MEDIA_CACHE.move_to_end(row["media_id"])
+    else:
+        cfg = next((c for c in WA_ALL if c["logical_id"] == row["number_label"] and c["token"]), None)
+        if not cfg:
+            raise HTTPException(410, f"'{row['number_label']}' isn't in Settings any more, so its files can't be loaded.")
+        data, mime = await fetch_media(cfg, row["media_id"])
+        _cache_media(row["media_id"], data, mime)
+    name = re.sub(r'[^A-Za-z0-9._ -]', "_", row["media_name"] or "") or f"whatsapp-{message_id[:8]}"
+    return Response(
+        content=data,
+        media_type=row["media_mime"] or mime,
+        headers={"Cache-Control": "private, max-age=3600", "Content-Disposition": f'inline; filename="{name}"'},
+    )
+
+
+@api.post("/inbox/send-media")
+async def inbox_send_media(
+    number_label: str = Form(...),
+    to: str = Form(...),
+    caption: str = Form(""),
+    file: UploadFile = File(...),
+):
+    cfg = sending_number(number_label)
+    to = clean_recipient(to)
+    await ensure_reply_window(cfg, to)
+    mime = (file.content_type or "").split(";")[0].strip().lower()
+    if mime == "image/jpg":
+        mime = "image/jpeg"
+    if mime not in SEND_TYPES:
+        raise HTTPException(
+            400, "WhatsApp can't send this type of file. Send a JPG/PNG photo, an MP4 video, an audio file, or a PDF/Word/Excel file."
+        )
+    kind, limit_mb = SEND_TYPES[mime]
+    data = await file.read(limit_mb * 1024 * 1024 + 1)
+    if len(data) > limit_mb * 1024 * 1024:
+        raise HTTPException(413, f"That file is too big. WhatsApp allows up to {limit_mb} MB for this type.")
+    if not data:
+        raise HTTPException(400, "The file is empty.")
+    filename = re.sub(r"[\r\n\"]", "", file.filename or "file")[:200] or "file"
+    caption = caption.strip()[:1024]
+    media_id = await wa_upload(cfg, data, mime, filename)
+    _cache_media(media_id, data, mime)
+    content: Dict[str, Any] = {"id": media_id}
+    if caption and kind != "audio":
+        content["caption"] = caption
+    if kind == "document":
+        content["filename"] = filename
+    try:
+        resp = await send_payload(
+            cfg, to, {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, "type": kind, kind: content},
+            kind=kind, text=caption if kind != "audio" else "", source="staff",
+            media={"media_id": media_id, "media_mime": mime, "media_name": filename if kind == "document" else ""},
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Could not reach WhatsApp: {e}")
+    if resp.status_code >= 300:
+        raise HTTPException(502, f"WhatsApp didn't accept the file: {_api_error(resp)}")
+    return await _thread(cfg["logical_id"], to)
 
 
 # ---------------------------------------------------------------------------

@@ -125,6 +125,7 @@ kind, body                                     last_preview, unread
 status  received|sent|delivered|read|failed
 source  customer|bot|staff|phone_app
 error, created_at
+media_id, media_mime, media_name (photos, voice notes, files)
 ```
 
 - `wa_messages` is every message in and out, including replies sent from the WhatsApp Business phone app (coexistence `smb_message_echoes`). Status updates only move forward (`sent → delivered → read`, or `failed`).
@@ -282,6 +283,8 @@ Routing is by `phone_number_id` only, so several business numbers can share one 
 **360dialog.** Same message JSON as Meta, sent to `D360_BASE_URL` (`https://waba-v2.360dialog.io`) `/messages` with a `D360-API-KEY` header. Its webhooks aren't signed, so each number gets `POST /api/wa/webhook/n/{number_id}/{webhook_key}` with a random key; adding a number sets it through `POST /v1/configs/webhook`. Payloads use Meta's `entry[].changes[].value` shape; a flat `value` is accepted too.
 
 **Chats (inbox).** `/api/inbox/*` reads `wa_contacts` and `wa_messages`. Staff replies go through `send_wa(..., source="staff")` and are refused with 409 outside the 24-hour window.
+
+**Media.** Incoming photos, videos, voice notes, stickers and documents keep WhatsApp's `media_id`, mime type and file name in `wa_messages`; the caption (or file name) is the body, so captioned photos also feed the read-only bot. `GET /api/inbox/media/{message_id}` fetches the file on demand (Meta: `GET /{media_id}` for a short-lived URL, then download with the bearer token; 360dialog: `GET {D360_BASE}/{media_id}`, then the same URL with `lookaside.fbsbx.com` swapped for the 360dialog host and the API key) and keeps up to 40 MB in an in-memory cache. Files aren't copied to our database, so they disappear when WhatsApp drops them (about 30 days). `POST /api/inbox/send-media` uploads the file (`POST /media`), sends it by id, and caches the bytes so the sent copy shows immediately. The browser loads files with the login token and turns them into `blob:` URLs.
 
 **Templates.** `GET /api/inbox/templates` loads the number's templates (Meta: `GET /{waba_id}/message_templates`; 360dialog: `GET /v1/configs/templates`), cached 5 minutes per number. `normalize_template` keeps the text header, body, footer and button labels, lists the blanks (`{{1}}` positional or `{{name}}` named), and marks a template unsendable if it isn't approved, has a media header, or has a link button with a variable. `POST /api/inbox/send-template` checks every blank is filled (WhatsApp rejects new lines in variables, so whitespace is collapsed), sends `type: template` through `send_payload` (which records it in `wa_messages` with `kind = template` and the filled-in text), and sets `orders.confirmed_at` when an `order_id` is given. Templates don't reopen the 24-hour window. Which order field fills each blank is chosen in the browser and remembered in `app_settings.templates` (`maps["name|language"]`); typed text is never remembered as-is. The frontend polls: the chat list every 5 s, an open chat every 4 s, the unread badge every 15 s.
 
