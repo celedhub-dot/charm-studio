@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router";
 import { Toaster } from "sonner";
 import Layout from "./components/Layout";
@@ -40,10 +40,14 @@ function useAuth() {
     if (state === "checking") loadMe();
   }, [state, loadMe]);
 
+  const manualLogout = useRef(false); // "Log out" clicked: no "session ended" notice
+
   useEffect(() => {
     const onLogout = () => {
+      const manual = manualLogout.current;
+      manualLogout.current = false;
       setState((prev) => {
-        if (prev === "in") setNotice("Your session ended. Please log in again.");
+        if (prev === "in" && !manual) setNotice("Your session ended. Please log in again.");
         return "out";
       });
       setMe(null);
@@ -59,6 +63,7 @@ function useAuth() {
 
   const logout = useCallback(() => {
     setNotice("");
+    manualLogout.current = true;
     signalLogout();
   }, []);
 
