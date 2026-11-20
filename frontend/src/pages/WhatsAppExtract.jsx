@@ -1,12 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
-import { Sparkle, FileText, UploadSimple, FloppyDisk, ChatText, Stack, CopySimple } from "@phosphor-icons/react";
-import { extractText, extractFile, bulkOrders, errorMessage } from "../lib/api";
+import { Sparkle, FileText, UploadSimple, FloppyDisk, ChatText, Stack, CopySimple, Brain } from "@phosphor-icons/react";
+import { extractText, extractFile, getExtractOptions, bulkOrders, errorMessage } from "../lib/api";
 import { PageHeader, EditableRows } from "../components/common";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription, Textarea, Spinner, Alert } from "../components/ui/primitives";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/overlays";
-import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, Textarea, Spinner, Alert, Label } from "../components/ui/primitives";
+import { Tabs, TabsList, TabsTrigger, TabsContent, SimpleSelect } from "../components/ui/overlays";import { Button } from "../components/ui/button";
 import { cn } from "../lib/utils";
 
 function SaveBar({ rows, onSaved, testPrefix }) {
@@ -35,7 +34,91 @@ function SaveBar({ rows, onSaved, testPrefix }) {
   );
 }
 
-function PasteTab() {
+/* ---------- AI model & effort ---------- */
+const AI_PREF_KEY = "charm.extract.ai";
+const EFFORT_LABELS = {
+  low: "Low: fastest, cheapest",
+  medium: "Medium",
+  high: "High: thinks harder on messy chats",
+  xhigh: "Extra high",
+  max: "Max: most thorough, most expensive",
+};
+// Rough cost of one big exported chat (~500 messages), in rupees, by model and effort. Estimates only.
+const COST_HINT = {
+  "claude-haiku-5-5": { low: 0.45, medium: 0.55, high: 0.7, xhigh: 0.9, max: 1.2, "": 0.55 },
+  "claude-sonnet-5-5": { low: 7, medium: 8.5, high: 10, xhigh: 13, max: 17, "": 10 },
+};
+const shortName = (id, models) => (models.find((m) => m.id === id)?.label || id || "").replace(/^Claude /, "");
+
+function loadPref() {
+  try {
+    return JSON.parse(localStorage.getItem(AI_PREF_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+function savePref(v) {
+  try {
+    localStorage.setItem(AI_PREF_KEY, JSON.stringify(v));
+  } catch {
+    /* private window etc.: the choice just isn't remembered */
+  }
+}
+
+/** Lets staff pick the Claude model and effort for this extraction. value = { model, effort } ("" = server default). */
+function AiPicker({ value, onChange }) {
+  const [opts, setOpts] = useState(null);
+  useEffect(() => {
+    getExtractOptions()
+      .then(setOpts)
+      .catch(() => setOpts({ provider: "unknown", models: [], efforts: [], default: {} }));
+  }, []);
+  if (!opts) return null;
+  if (opts.provider === "ollama") {
+    return <p className="text-xs text-muted">AI: Ollama (set on the server).</p>;
+  }
+  if (!opts.models.length) return null;
+
+  const def = opts.default || {};
+  const model = value.model || def.model;
+  const effort = value.effort || (value.model ? "" : def.effort || "");
+  const cost = COST_HINT[model]?.[effort] ?? COST_HINT[model]?.[""];
+  const modelOptions = [
+    { value: "default", label: `Default: ${shortName(def.model, opts.models)}${def.effort ? `, ${def.effort} effort` : ""}` },
+    ...opts.models.map((m) => ({ value: m.id, label: m.label })),
+  ];
+  const effortOptions = [{ value: "default", label: "Default for this model" }, ...opts.efforts.map((e) => ({ value: e, label: EFFORT_LABELS[e] || e }))];
+  const set = (patch) => {
+    const next = { ...value, ...patch };
+    savePref(next);
+    onChange(next);
+  };
+
+  return (
+    <div className="mb-5 rounded-2xl border border-line bg-white p-4" data-testid="extract-ai-picker">
+      <div className="mb-3 flex items-center gap-2 font-heading text-sm font-bold">
+        <Brain size={16} className="text-forest" /> AI model
+        {!opts.ready && <span className="text-xs font-normal text-danger">(no API key on the server yet)</span>}
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label>Model</Label>
+          <SimpleSelect value={value.model || "default"} onValueChange={(v) => set({ model: v === "default" ? "" : v })} options={modelOptions} testId="extract-model-select" />
+          <p className="text-xs text-muted">{opts.models.find((m) => m.id === model)?.hint}</p>
+        </div>
+        <div className="space-y-1.5">
+          <Label>Effort</Label>
+          <SimpleSelect value={value.effort || "default"} onValueChange={(v) => set({ effort: v === "default" ? "" : v })} options={effortOptions} testId="extract-effort-select" />
+          <p className="text-xs text-muted" data-testid="extract-cost-hint">
+            {cost != null ? `About ₹${cost < 1 ? cost.toFixed(2) : Math.round(cost)} for a big chat file (~500 messages); short pastes cost much less.` : ""}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PasteTab({ ai }) {
   const [text, setText] = useState("");
   const [rows, setRows] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -44,10 +127,11 @@ function PasteTab() {
     if (!text.trim()) return toast.error("Paste some chat text first");
     setLoading(true);
     try {
-      const res = await extractText(text);
+      const res = await extractText(text, ai);
       setRows(res.orders);
+      const by = res.model ? ` (${res.model.replace(/^claude-/, "")}${res.effort ? `, ${res.effort}` : ""})` : "";
       toast[res.orders.length ? "success" : "info"](
-        res.orders.length ? `Found ${res.orders.length} orders` : "No orders found in this text"
+        res.orders.length ? `Found ${res.orders.length} orders${by}` : `No orders found in this text${by}`
       );
     } catch (e) {
       toast.error(errorMessage(e));
@@ -89,7 +173,7 @@ function PasteTab() {
   );
 }
 
-function FileTab() {
+function FileTab({ ai }) {
   const [file, setFile] = useState(null);
   const [drag, setDrag] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -109,10 +193,10 @@ function FileTab() {
     if (!file) return;
     setLoading(true);
     try {
-      const res = await extractFile(file);
+      const res = await extractFile(file, ai);
       setResult(res);
       setRows(res.orders);
-      toast.success(`Found ${res.orders.length} orders`);
+      toast.success(`Found ${res.orders.length} orders${res.model ? ` (${res.model.replace(/^claude-/, "")}${res.effort ? `, ${res.effort}` : ""})` : ""}`);
     } catch (e) {
       toast.error(errorMessage(e));
     } finally {
@@ -229,9 +313,14 @@ function FileTab() {
 }
 
 export default function WhatsAppExtract() {
+  const [ai, setAi] = useState(() => {
+    const p = loadPref();
+    return { model: p.model || "", effort: p.effort || "" };
+  });
   return (
     <div>
       <PageHeader title="WhatsApp Extract" subtitle="Turn customer chats into structured orders with AI, review them, then save." />
+      <AiPicker value={ai} onChange={setAi} />
       <Tabs defaultValue="paste">
         <TabsList>
           <TabsTrigger value="paste" data-testid="tab-paste">
@@ -242,10 +331,10 @@ export default function WhatsAppExtract() {
           </TabsTrigger>
         </TabsList>
         <TabsContent value="paste">
-          <PasteTab />
+          <PasteTab ai={ai} />
         </TabsContent>
         <TabsContent value="file">
-          <FileTab />
+          <FileTab ai={ai} />
         </TabsContent>
       </Tabs>
     </div>

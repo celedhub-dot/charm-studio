@@ -77,6 +77,22 @@ async def main():
     await server.extract(server.ExtractIn(text="Riya: order 123456789012_1"))
     check("output_config" not in calls[-1]["extra_body"], "no effort sent when the setting is blank (model default)")
 
+    print("Staff's choice on the Extract page")
+    opts = await server.extract_options()
+    check([m["id"] for m in opts["models"]] == ["claude-haiku-5-5", "claude-sonnet-5-5"] and opts["default"]["model"] == "claude-sonnet-5-5", "options list Haiku and Sonnet, default Sonnet")
+    res = await server.extract(server.ExtractIn(text="Riya: 123456789012_1 AARAV heart", model="claude-haiku-5-5", effort="max"))
+    c = calls[-1]
+    check(c["model"] == "claude-haiku-5-5" and c["extra_body"].get("output_config") == {"effort": "max"}, "chosen model and effort are used")
+    check(res["model"] == "claude-haiku-5-5" and res["effort"] == "max", "response says which model and effort ran")
+    await server.extract(server.ExtractIn(text="Riya: 123456789012_1", model="", effort=""))
+    check(calls[-1]["model"] == "claude-sonnet-5-5", "blank choice falls back to the server default")
+    for bad, label in (({"model": "claude-opus-5-5"}, "model not on the list refused"), ({"effort": "turbo"}, "unknown effort refused")):
+        try:
+            await server.extract(server.ExtractIn(text="x", **bad))
+            check(False, label)
+        except server.HTTPException as e:
+            check(e.status_code == 400, label, e.detail)
+
     print("Read-only bot")
     await server.claude_text(server.CHAT_EXTRACT_SYSTEM, "Riya: order 123456789012_1 AARAV heart", max_tokens=2000, effort="low")
     check(calls[-1]["model"] == "claude-haiku-5-5", "read-only bot runs on Haiku")

@@ -86,10 +86,15 @@ export const bulkOrders = (orders) => api.post("/orders/bulk", { orders }).then(
 export const getStats = () => api.get("/stats").then((r) => r.data);
 
 // AI
-export const extractText = (text) => api.post("/extract", { text }).then((r) => r.data);
-export const extractFile = (file) => {
+export const getExtractOptions = () => api.get("/extract/options").then((r) => r.data);
+// ai = { model, effort }; empty strings mean "use the server's default"
+export const extractText = (text, ai = {}) =>
+  api.post("/extract", { text, model: ai.model || null, effort: ai.effort || null }).then((r) => r.data);
+export const extractFile = (file, ai = {}) => {
   const fd = new FormData();
   fd.append("file", file);
+  fd.append("model", ai.model || "");
+  fd.append("effort", ai.effort || "");
   return api.post("/extract/bulk-file", fd, { timeout: 15 * 60 * 1000 }).then((r) => r.data);
 };
 

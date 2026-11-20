@@ -743,6 +743,8 @@ class BulkOrders(BaseModel):
 
 class ExtractIn(BaseModel):
     text: str
+    model: Optional[str] = None  # "" / None = the server's ANTHROPIC_EXTRACT_MODEL
+    effort: Optional[str] = None  # "" / None = default for the chosen model
 
 
 class TestSendIn(BaseModel):
@@ -1178,22 +1180,60 @@ def dedupe_orders(rows: List[Dict[str, str]]):
 # ---------------------------------------------------------------------------
 # AI extraction
 # ---------------------------------------------------------------------------
+# Models staff can pick on the WhatsApp Extract page (Claude only; Ollama always uses OLLAMA_MODEL).
+EXTRACT_CHOICES = {
+    "claude-haiku-5-5": {"label": "Claude Haiku 5.5", "hint": "Cheapest. Good for clear chats; raise the effort for messy ones."},
+    "claude-sonnet-5-5": {"label": "Claude Sonnet 5.5", "hint": "Most accurate on corrections and several orders in one chat. About 20x Haiku's price."},
+}
+
+
+def extract_settings(model: Optional[str], effort: Optional[str]) -> tuple:
+    """The (model, effort) to use for one extraction, from the page's choice or the server defaults."""
+    if AI_PROVIDER == "ollama":
+        return EXTRACT_MODEL, None
+    model = (model or "").strip() or EXTRACT_MODEL
+    if model not in EXTRACT_CHOICES and model != EXTRACT_MODEL:
+        raise HTTPException(400, f"Unknown model '{model}'. Choose one of: {', '.join(EXTRACT_CHOICES)}.")
+    effort = (effort or "").strip().lower() or None
+    if effort and effort not in EFFORTS:
+        raise HTTPException(400, f"Effort must be one of: {', '.join(EFFORTS)}.")
+    if effort is None and model == EXTRACT_MODEL:
+        effort = EXTRACT_EFFORT  # "Default" keeps the server's setting for its own model
+    return model, effort
+
+
+@api.get("/extract/options")
+async def extract_options():
+    models = [] if AI_PROVIDER == "ollama" else [{"id": k, **v} for k, v in EXTRACT_CHOICES.items()]
+    if AI_PROVIDER != "ollama" and EXTRACT_MODEL not in EXTRACT_CHOICES:
+        models.append({"id": EXTRACT_MODEL, "label": EXTRACT_MODEL, "hint": "Set on the server."})
+    return {
+        "provider": AI_PROVIDER,
+        "ready": ai_ready(),
+        "default": {"model": EXTRACT_MODEL, "effort": EXTRACT_EFFORT or ""},
+        "models": models,
+        "efforts": list(EFFORTS),
+    }
+
+
 @api.post("/extract")
 async def extract(payload: ExtractIn):
     if not payload.text.strip():
         raise HTTPException(400, "Text is empty")
+    model, effort = extract_settings(payload.model, payload.effort)
     try:
-        raw = await claude_text(EXTRACT_SYSTEM, payload.text, model=EXTRACT_MODEL, effort=EXTRACT_EFFORT)
+        raw = await claude_text(EXTRACT_SYSTEM, payload.text, model=model, effort=effort)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
         log.exception("Extraction failed")
         raise HTTPException(502, f"AI extraction failed: {e}")
-    return {"orders": parse_orders(raw)}
+    return {"orders": parse_orders(raw), "model": model, "effort": effort or ""}
 
 
 @api.post("/extract/bulk-file")
-async def extract_bulk_file(file: UploadFile = File(...)):
+async def extract_bulk_file(file: UploadFile = File(...), model: str = Form(""), effort: str = Form("")):
+    model, effort = extract_settings(model, effort)
     content = (await file.read()).decode("utf-8", errors="ignore")
     chunks = chunk_text(content)
     if not chunks:
@@ -1202,7 +1242,7 @@ async def extract_bulk_file(file: UploadFile = File(...)):
 
     async def run(chunk: str) -> List[Dict[str, str]]:
         async with sem:
-            return parse_orders(await claude_text(EXTRACT_SYSTEM, chunk, model=EXTRACT_MODEL, effort=EXTRACT_EFFORT))
+            return parse_orders(await claude_text(EXTRACT_SYSTEM, chunk, model=model, effort=effort))
 
     try:
         results = await asyncio.gather(*(run(c) for c in chunks))
@@ -1213,7 +1253,7 @@ async def extract_bulk_file(file: UploadFile = File(...)):
         raise HTTPException(502, f"AI extraction failed: {e}")
     all_rows = [r for res in results for r in res]
     orders, dupes = dedupe_orders(all_rows)
-    return {"orders": orders, "chunks_processed": len(chunks), "duplicates_removed": dupes}
+    return {"orders": orders, "chunks_processed": len(chunks), "duplicates_removed": dupes, "model": model, "effort": effort or ""}
 
 
 # ---------------------------------------------------------------------------
