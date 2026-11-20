@@ -317,7 +317,16 @@ async def lifespan(_: FastAPI):
     )
     if RESET_PASSWORD:
         log.warning("RESET_PASSWORD is set. Log in with it, choose a new password, then remove it from the environment.")
+    pending = await db().fetchval("SELECT count(*) FROM wa_contacts WHERE read_due_at IS NOT NULL")
+    if pending:
+        log.info("Catching up on %d chat read(s) that were waiting before the restart.", pending)
+    worker = asyncio.create_task(read_worker())
     yield
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
     await pool.close()
 
 
@@ -1670,8 +1679,9 @@ CHAT_EXTRACT_SYSTEM = (
     "Use empty strings for unknown fields. If there are no order details, return []. No prose."
 )
 READ_DEBOUNCE_S = float(os.environ.get("READ_DEBOUNCE_SECONDS", "20"))
-_read_pending: Dict[tuple, float] = {}
-_background: set = set()
+READ_POLL_S = min(5.0, max(0.25, READ_DEBOUNCE_S / 2))  # how often the worker looks for chats that are due
+READ_MAX_ATTEMPTS = 3
+READ_RETRY_S = 120
 
 
 def ai_ready() -> bool:
@@ -1734,24 +1744,59 @@ async def read_order_details(label: str, customer: str) -> Dict[str, Any]:
     return {"orders": saved, "used_ai": used_ai}
 
 
-def schedule_read(label: str, customer: str) -> None:
-    """Read order details after a short quiet period, so a burst of messages triggers one read."""
-    key, stamp = (label, customer), time.monotonic()
-    _read_pending[key] = stamp
+async def schedule_read(label: str, customer: str) -> None:
+    """Read the chat's order details after a quiet period, so a burst of messages triggers one read.
 
-    async def run():
-        await asyncio.sleep(READ_DEBOUNCE_S)
-        if _read_pending.get(key) != stamp:
-            return  # a newer message arrived; its own task will read
-        _read_pending.pop(key, None)
+    The due time lives on the chat row, so reads that are waiting when the server restarts (every deploy)
+    still happen: the worker below picks them up when the app comes back."""
+    await db().execute(
+        "UPDATE wa_contacts SET read_due_at = now() + make_interval(secs => $3), read_attempts = 0 "
+        "WHERE number_label = $1 AND customer_phone = $2",
+        label, customer, READ_DEBOUNCE_S,
+    )
+
+
+async def run_due_reads() -> int:
+    """Read every chat whose quiet period is over. Returns how many were read."""
+    rows = await db().fetch(
+        "SELECT number_label, customer_phone, read_due_at, read_attempts FROM wa_contacts "
+        "WHERE read_due_at <= now() ORDER BY read_due_at LIMIT 20"
+    )
+    done = 0
+    for r in rows:
+        # Claim it: only if nobody else did and no newer message pushed the time back.
+        claimed = await db().fetchval(
+            "UPDATE wa_contacts SET read_due_at = NULL WHERE number_label = $1 AND customer_phone = $2 "
+            "AND read_due_at = $3 RETURNING 1",
+            r["number_label"], r["customer_phone"], r["read_due_at"],
+        )
+        if not claimed:
+            continue
         try:
-            await read_order_details(label, customer)
+            await read_order_details(r["number_label"], r["customer_phone"])
+            done += 1
         except Exception:  # noqa: BLE001
-            log.exception("Reading order details failed for %s", customer)
+            attempts = r["read_attempts"] + 1
+            log.exception("Reading order details failed for %s (attempt %d)", r["customer_phone"], attempts)
+            if attempts < READ_MAX_ATTEMPTS:
+                await db().execute(
+                    "UPDATE wa_contacts SET read_due_at = now() + make_interval(secs => $3), read_attempts = $4 "
+                    "WHERE number_label = $1 AND customer_phone = $2 AND read_due_at IS NULL",
+                    r["number_label"], r["customer_phone"], READ_RETRY_S, attempts,
+                )
+    return done
 
-    task = asyncio.create_task(run())
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+
+async def read_worker() -> None:
+    """Runs for the life of the app; also catches up on reads that were waiting before a restart."""
+    while True:
+        try:
+            await run_due_reads()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("Read worker error")
+        await asyncio.sleep(READ_POLL_S)
 
 
 async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
@@ -1774,7 +1819,7 @@ async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
                              name=names.get(customer, ""), at=_msg_time(msg), media=message_media(msg))
         mode = cfg.get("bot_mode") or "ask"
         if mode == "read" and kind in ("image", "video", "document") and text.strip():
-            schedule_read(label, customer)  # a photo's caption can carry the order details
+            await schedule_read(label, customer)  # a photo's caption can carry the order details
             continue
         if kind != "text" or not text.strip():
             continue
@@ -1782,7 +1827,7 @@ async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
             if mode == "ask":
                 await handle_bot_message(cfg, customer, text)
             elif mode == "read":
-                schedule_read(label, customer)
+                await schedule_read(label, customer)
         except Exception:  # noqa: BLE001
             log.exception("Bot failed for message %s", msg["id"])
     for echo in value.get("message_echoes") or []:  # coexistence: sent from the WhatsApp Business app

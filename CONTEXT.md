@@ -105,6 +105,7 @@ These came from the original spec. Keep them unless there's a good reason to cha
 - The WhatsApp bot hasn't been tested against a real Meta or 360dialog number yet (none added).
 - The main number 83390 39324 had a temporary WhatsApp restriction (several staff on WhatsApp Web). Plan: once it lifts, connect it to 360dialog with coexistence and add it in Settings as a 360dialog number in Read-only mode, so staff chat in Charm.Studio instead of WhatsApp Web.
 - Photos, voice notes and files in Chats pass 23 automated checks (`tests/test_media.py`) and were clicked through against a local fake 360dialog (photo with caption shown, PDF card, staff photo sent with caption).
+- The read-only bot's waiting reads are stored in the database and survive restarts and deploys (`tests/test_reads.py`, 6 checks).
 - Late replies (typed replies after 24 hours sent as an order-update template) pass the automated checks in `tests/test_templates.py` (52 total). The reply-box and dialog changes compile but weren't clicked through in a browser.
 - Templates (order confirmations after the 24-hour window) pass 41 automated checks (`tests/test_templates.py`) and were clicked through against a local fake 360dialog. No real template has been sent yet: one must first be created and approved in WhatsApp Manager or the 360dialog Hub.
 - No real Meesho or Flipkart label PDF has been tried yet; only generated test PDFs.
@@ -119,7 +120,7 @@ These came from the original spec. Keep them unless there's a good reason to cha
 4a. Create an order-confirmation template (category Utility) and get it approved; for Meta numbers, enter the WhatsApp Business Account ID in Settings.
 4b. +91 94556 58565 has no WhatsApp account, so it can go straight on Meta's Cloud API (no 360dialog needed): wait for the display name "Celed Hub Charms" to be approved, register it, then add it in Settings as a Meta number with WABA ID 1658055335961404. Never install the WhatsApp app on it afterwards.
 5. Test with real label PDFs from both marketplaces. Check sticker placement, rotated pages and ID detection.
-6. Housekeeping: prune old `wa_events` rows; consider making webhook handling durable.
+6. Housekeeping: prune old `wa_events` rows; consider making webhook handling durable (chat reads already are).
 
 ## Local development environment (seller's Windows PC)
 

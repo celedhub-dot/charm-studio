@@ -133,6 +133,10 @@ CREATE TABLE IF NOT EXISTS wa_contacts (
     PRIMARY KEY (number_label, customer_phone)
 );
 CREATE INDEX IF NOT EXISTS wa_contacts_recent_idx ON wa_contacts (last_message_at DESC);
+-- Read-only bot: when this chat is due to be read (kept in the database so a restart doesn't lose it)
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS read_due_at   timestamptz;
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS read_attempts int NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS wa_contacts_read_due_idx ON wa_contacts (read_due_at) WHERE read_due_at IS NOT NULL;
 
 -- Lock the tables away from Supabase's public REST API (anon/authenticated keys).
 -- The backend connects as the table owner, which is not affected by RLS.

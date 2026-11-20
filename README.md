@@ -134,7 +134,7 @@ Use this when the number is also used in the WhatsApp Business phone app, so the
 3. In Charm.Studio: **Settings → WhatsApp numbers → Add number → 360dialog**. Enter the number with country code (e.g. `918339039324`) and the API key, and keep the bot on **Read only**.
 4. The app points the number's webhook at itself automatically (`/api/wa/webhook/n/<id>/<secret>`). The card's "Copy webhook URL" is only needed if you ever set it by hand.
 
-360dialog doesn't sign webhooks, so each number gets its own unguessable webhook URL instead. The bot waits `READ_DEBOUNCE_SECONDS` (default 20) after a customer's last message before reading the chat, so a customer typing in several short messages costs one AI call. Without an AI key it still saves order IDs it finds by pattern. It never overwrites fields staff have edited.
+360dialog doesn't sign webhooks, so each number gets its own unguessable webhook URL instead. The bot waits `READ_DEBOUNCE_SECONDS` (default 20) after a customer's last message before reading the chat, so a customer typing in several short messages costs one AI call. The waiting read is stored in the database, so a restart or deploy doesn't lose it: it runs as soon as the app is back. Without an AI key it still saves order IDs it finds by pattern. It never overwrites fields staff have edited.
 
 **AI cost:** for reading chats, Claude Haiku is the cheapest option that works well. Set `ANTHROPIC_MODEL=claude-haiku-5-5` on Render. At roughly 1,500 messages a day this costs about ₹10 a day.
 
@@ -235,6 +235,13 @@ cd backend
 ```bash
 cd backend
 .venv/Scripts/python.exe tests/test_media.py
+```
+
+`backend/tests/test_reads.py` stops and restarts the app while a chat read is waiting and checks it still happens (exactly once), that a burst of messages is read once, and that a failed read is retried.
+
+```bash
+cd backend
+.venv/Scripts/python.exe tests/test_reads.py
 ```
 
 ## Notes
