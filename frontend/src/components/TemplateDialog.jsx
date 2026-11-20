@@ -58,6 +58,8 @@ const render = (text, names, values) => {
   return (text || "").replace(PH, (m, n) => (lookup[n] ? lookup[n] : `[${n}]`));
 };
 
+export { FIELDS, tplKey, guessField, fromSaved, render };
+
 /**
  * Send an approved WhatsApp template.
  *  numberLabel / phone / contactName: who to send to (number can be changed if it isn't active).

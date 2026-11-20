@@ -31,6 +31,10 @@ services:
         value: anthropic # or: ollama
       - key: ANTHROPIC_API_KEY
         sync: false # needed when AI_PROVIDER=anthropic
+      - key: ANTHROPIC_EXTRACT_MODEL
+        value: claude-sonnet-5-5 # WhatsApp Extract (bulk chats): more accurate on corrections and multi-order chats
+      - key: ANTHROPIC_EXTRACT_EFFORT
+        sync: false # optional: low|medium|high|xhigh|max (e.g. high with claude-haiku-5-5 for cheaper Extract)
       - key: ANTHROPIC_MODEL
         value: claude-haiku-5-5 # cheapest for reading chats; remove to use the default Sonnet
       - key: OLLAMA_API_KEY

@@ -301,7 +301,7 @@ All configuration comes from environment variables: `backend/.env` locally and t
 | `DATABASE_URL`, `DB_POOL_SIZE` | Supabase connection (Session pooler URI) and pool size |
 | `CORS_ORIGINS`, `CORS_ORIGIN_REGEX` | allowed frontend origins; the regex is for Vercel preview URLs |
 | `AI_PROVIDER` | `anthropic` (default) or `ollama` |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_EXTRACT_MODEL`, `ANTHROPIC_EXTRACT_EFFORT` | Claude: the key, the model for the WhatsApp bots, the model for WhatsApp Extract (default `claude-sonnet-5-5`) and its optional effort (`low`-`max`) |
 | `OLLAMA_API_KEY`, `OLLAMA_MODEL`, `OLLAMA_BASE_URL` | Ollama Cloud or a self-hosted server |
 | `WA_GRAPH_VERSION`, `WA_VERIFY_TOKEN` | WhatsApp Cloud API version, webhook verify token |
 | `WA_NUMBERS`, `WA_<ID>_*` | legacy; imported into Settings once |

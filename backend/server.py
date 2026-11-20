@@ -999,10 +999,20 @@ AI_PROVIDER = os.environ.get("AI_PROVIDER", "anthropic").strip().lower() or "ant
 if AI_PROVIDER not in ("anthropic", "ollama"):
     raise RuntimeError(f"AI_PROVIDER must be 'anthropic' or 'ollama', got '{AI_PROVIDER}'")
 
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "").strip() or "claude-sonnet-5-5"
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "").strip() or "claude-sonnet-5-5"  # the WhatsApp bots
+# WhatsApp Extract (bulk chats, corrections, several orders per chat) is worth a stronger model; the bots
+# read short chats all day, where the cheaper ANTHROPIC_MODEL (e.g. claude-haiku-5-5) is enough.
+ANTHROPIC_EXTRACT_MODEL = os.environ.get("ANTHROPIC_EXTRACT_MODEL", "").strip() or "claude-sonnet-5-5"
 OLLAMA_BASE_URL = (os.environ.get("OLLAMA_BASE_URL", "").strip() or "https://ollama.com").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "").strip()
 AI_MODEL = OLLAMA_MODEL if AI_PROVIDER == "ollama" else ANTHROPIC_MODEL
+EXTRACT_MODEL = OLLAMA_MODEL if AI_PROVIDER == "ollama" else ANTHROPIC_EXTRACT_MODEL
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Optional thinking effort for WhatsApp Extract (e.g. "high" makes a cheap Haiku think harder); blank = model default.
+EXTRACT_EFFORT = os.environ.get("ANTHROPIC_EXTRACT_EFFORT", "").strip().lower() or None
+if EXTRACT_EFFORT and EXTRACT_EFFORT not in EFFORTS:
+    raise RuntimeError(f"ANTHROPIC_EXTRACT_EFFORT must be one of {', '.join(EFFORTS)}, got '{EXTRACT_EFFORT}'")
+AI_USAGE: List[Dict[str, Any]] = []  # recent calls' token usage (model, input, output); handy for cost checks
 # Models that support server-side refusal fallbacks ("fallbacks": "default"). Others (e.g. the cheaper
 # claude-haiku-5-5, a good fit for reading order details) are called without it.
 FALLBACK_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-2", "claude-fable-5-1"}
@@ -1051,13 +1061,16 @@ def _response_text(resp: Any) -> str:
     return "".join(getattr(b, "text", "") or "" for b in resp.content if getattr(b, "type", "") == "text")
 
 
-async def claude_text(system: str, user: str, max_tokens: int = 16000, effort: Optional[str] = None) -> str:
+async def claude_text(
+    system: str, user: str, max_tokens: int = 16000, effort: Optional[str] = None, model: Optional[str] = None
+) -> str:
     """Send one system+user prompt to the configured AI provider and return the reply text."""
     client = get_ai()
+    model = model or AI_MODEL
     if AI_PROVIDER == "ollama":
         # Plain Messages call: Ollama does not support Anthropic-only extras (fallbacks, effort).
         resp = await client.messages.create(
-            model=AI_MODEL,
+            model=model,
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
@@ -1067,20 +1080,25 @@ async def claude_text(system: str, user: str, max_tokens: int = 16000, effort: O
     # Sent via extra_body so the call works regardless of which SDK release exposes these as named params.
     extra: Dict[str, Any] = {}
     betas: List[str] = []
-    if effort and not AI_MODEL.startswith("claude-haiku-4"):
+    if effort and not model.startswith("claude-haiku-4"):
         extra["output_config"] = {"effort": effort}
-    if AI_MODEL in FALLBACK_MODELS:
+    if model in FALLBACK_MODELS:
         # If the model declines, the API retries on a suitable fallback model server-side.
         extra["fallbacks"] = "default"
         betas.append("server-side-fallback-2026-07-01")
     resp = await client.beta.messages.create(
-        model=AI_MODEL,
+        model=model,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
         betas=betas,
         extra_body=extra,
     )
+    usage = getattr(resp, "usage", None)
+    if usage is not None:
+        AI_USAGE.append({"model": model, "input": getattr(usage, "input_tokens", 0) or 0,
+                         "output": getattr(usage, "output_tokens", 0) or 0})
+        del AI_USAGE[:-200]
     if resp.stop_reason == "refusal":
         raise RuntimeError("Claude declined to process this text")
     return _response_text(resp)
@@ -1165,7 +1183,7 @@ async def extract(payload: ExtractIn):
     if not payload.text.strip():
         raise HTTPException(400, "Text is empty")
     try:
-        raw = await claude_text(EXTRACT_SYSTEM, payload.text)
+        raw = await claude_text(EXTRACT_SYSTEM, payload.text, model=EXTRACT_MODEL, effort=EXTRACT_EFFORT)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -1184,7 +1202,7 @@ async def extract_bulk_file(file: UploadFile = File(...)):
 
     async def run(chunk: str) -> List[Dict[str, str]]:
         async with sem:
-            return parse_orders(await claude_text(EXTRACT_SYSTEM, chunk))
+            return parse_orders(await claude_text(EXTRACT_SYSTEM, chunk, model=EXTRACT_MODEL, effort=EXTRACT_EFFORT))
 
     try:
         results = await asyncio.gather(*(run(c) for c in chunks))
@@ -2893,7 +2911,7 @@ async def save_template_settings(payload: TemplateSettingsIn):
 @api.get("/system/status")
 async def system_status(request: Request):
     return {
-        "ai": {"provider": AI_PROVIDER, "model": AI_MODEL or "", "ready": ai_ready()},
+        "ai": {"provider": AI_PROVIDER, "model": AI_MODEL or "", "extract_model": EXTRACT_MODEL or "", "extract_effort": EXTRACT_EFFORT or "", "ready": ai_ready()},
         "email_reset": {
             "configured": bool(RESEND_API_KEY),
             "sender": RESEND_FROM,

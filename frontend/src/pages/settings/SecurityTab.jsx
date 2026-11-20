@@ -209,7 +209,13 @@ function SystemCard() {
             {s.ai.provider === "ollama" ? "Ollama" : "Claude (Anthropic)"}
             {s.ai.model && (
               <>
-                , model <span className="font-mono">{s.ai.model}</span>
+                , bot <span className="font-mono">{s.ai.model}</span>
+              </>
+            )}
+            {s.ai.extract_model && (s.ai.extract_model !== s.ai.model || s.ai.extract_effort) && (
+              <>
+                , WhatsApp Extract <span className="font-mono">{s.ai.extract_model}</span>
+                {s.ai.extract_effort && <> (effort {s.ai.extract_effort})</>}
               </>
             )}
             {s.ai.ready ? ": ready." : ": no API key yet, so WhatsApp Extract and long bot messages won't use AI."}

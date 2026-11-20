@@ -12,7 +12,7 @@ Charm.Studio is for a small seller who takes customised-charm orders on WhatsApp
 - **Label Studio:** drop in a label PDF and see each page's detected Order ID and matched order. Fix unmatched pages by hand, then download a copy with a small customisation sticker in a corner of each label, away from the barcode.
 - **WhatsApp Bot:** each number has a bot mode. **Read only** quietly reads every chat and saves the order ID, name, charm and notes it finds, never messaging customers (use this when staff also chat on the number). **Ask questions** has the bot ask the customer step by step. **Off** just stores messages for Chats. Supports several numbers, connected directly through Meta or through 360dialog.
 - **Dashboard:** order counts (total, today, from WhatsApp, by source), recent orders and shortcuts.
-- **Settings:** your account (name, email, password), WhatsApp numbers (add, check, pause, delete; tokens stored encrypted), shop name, the bot's message wording, Label Studio defaults, and security (session length, log out other devices, recent activity, system status).
+- **Settings:** your account (name, email, password), WhatsApp numbers (add, check, pause, delete; tokens stored encrypted), message templates (what fills each blank, which template "Send confirmation" and late replies use), shop name, the bot's message wording, Label Studio defaults, and security (session length, log out other devices, recent activity, system status).
 
 - **Backend:** FastAPI, asyncpg (Supabase Postgres), PyMuPDF, Anthropic SDK (Claude `claude-sonnet-5-5` by default, or Ollama), Meta WhatsApp Cloud API
 - **Frontend:** React (CRA), React Router v7, Tailwind CSS, shadcn-style components on Radix, Phosphor Icons, Sonner, axios
@@ -136,7 +136,7 @@ Use this when the number is also used in the WhatsApp Business phone app, so the
 
 360dialog doesn't sign webhooks, so each number gets its own unguessable webhook URL instead. The bot waits `READ_DEBOUNCE_SECONDS` (default 20) after a customer's last message before reading the chat, so a customer typing in several short messages costs one AI call. The waiting read is stored in the database, so a restart or deploy doesn't lose it: it runs as soon as the app is back. Without an AI key it still saves order IDs it finds by pattern. It never overwrites fields staff have edited.
 
-**AI cost:** for reading chats, Claude Haiku is the cheapest option that works well. Set `ANTHROPIC_MODEL=claude-haiku-5-5` on Render. At roughly 1,500 messages a day this costs about ₹10 a day.
+**AI cost:** for reading chats, Claude Haiku is the cheapest option that works well. Set `ANTHROPIC_MODEL=claude-haiku-5-5` on Render. At roughly 1,500 messages a day this costs about ₹10 a day. WhatsApp Extract (bulk chat files) uses its own model, `ANTHROPIC_EXTRACT_MODEL` (default `claude-sonnet-5-5`), because long chats with corrections and several orders are where a stronger model pays off. `ANTHROPIC_EXTRACT_EFFORT` (`low` to `max`, blank = model default) sets how hard it thinks: Haiku at `high` costs roughly a fifteenth of Sonnet, so run `tests/test_ai_live.py` (below) to compare accuracy and cost before choosing.
 
 ### Order confirmations and other templates
 
@@ -159,7 +159,7 @@ Hi {{1}}, here is an update about your order {{2}}:
 Reply to this message if you have any questions. Thank you for shopping with Celed Hub!
 ```
 
-(Meta rejects templates that start or end with a blank, or that are mostly blanks, so keep fixed text around `{{3}}`.) Once it's approved, open **Send template** in any chat, pick it, set the blanks to *Customer name*, *Order ID* and *Your message*, tick **Use for replies after 24 hours** and click **Save without sending**. From then on, when a chat's window has closed, staff just type in the reply box and Charm.Studio sends it with that template (a small Meta fee each). If the customer has no order ID saved, it says so instead of sending; a missing WhatsApp name becomes "there". Photos and files still need an open window. Use it only for order-related messages: promotional text in a Utility template breaks Meta's rules.
+(Meta rejects templates that start or end with a blank, or that are mostly blanks, so keep fixed text around `{{3}}`.) Once it's approved, open **Settings → Templates**, pick it, set the blanks to *Customer name*, *Order ID* and *Your message*, tick **Use for replies after 24 hours** and click **Save** (no chat needed; the same choice is also available from **Send template** in a chat). From then on, when a chat's window has closed, staff just type in the reply box and Charm.Studio sends it with that template (a small Meta fee each). If the customer has no order ID saved, it says so instead of sending; a missing WhatsApp name becomes "there". Photos and files still need an open window. Use it only for order-related messages: promotional text in a Utility template breaks Meta's rules.
 
 ## API summary
 
@@ -244,10 +244,18 @@ cd backend
 .venv/Scripts/python.exe tests/test_reads.py
 ```
 
+`backend/tests/test_ai_models.py` checks which model each AI job uses and which options it sends (no real AI calls). `backend/tests/test_ai_live.py` makes **real, billed** calls (a few cents) with the key in `backend/.env`, running tricky sample chats (Hinglish, corrections, two orders in one chat, no order) through Haiku at low effort, Haiku at high effort and Sonnet, and printing how many fields each got right and what the calls cost; it skips itself when no key is set.
+
+```bash
+cd backend
+.venv/Scripts/python.exe tests/test_ai_models.py
+.venv/Scripts/python.exe tests/test_ai_live.py
+```
+
 ## Notes
 
 - **AI provider** (`AI_PROVIDER`):
-  - `anthropic` (default): `claude-sonnet-5-5` with server-side refusal fallbacks turned on (`fallbacks: "default"`). Set `ANTHROPIC_MODEL` to use a different model; `claude-haiku-5-5` is the cheapest choice for reading chats. The key comes from platform.claude.com and is billed separately from a Claude Pro subscription.
+  - `anthropic` (default): `claude-sonnet-5-5` with server-side refusal fallbacks turned on (`fallbacks: "default"`). Set `ANTHROPIC_MODEL` for the WhatsApp bots (`claude-haiku-5-5` is the cheapest choice for reading chats) and `ANTHROPIC_EXTRACT_MODEL` for WhatsApp Extract (default `claude-sonnet-5-5`). Fallbacks are only sent to models that support them (not Haiku). The key comes from platform.claude.com and is billed separately from a Claude Pro subscription.
   - `ollama`: Ollama's Anthropic-compatible endpoint. Set `OLLAMA_API_KEY` and `OLLAMA_MODEL`. `OLLAMA_BASE_URL` defaults to Ollama Cloud (`https://ollama.com`); point it at `http://localhost:11434` for a local server, which needs no key. Open models can be less consistent at returning clean JSON, so review the preview table before saving.
 - **Media in Chats:** WhatsApp keeps customers' files for about 30 days. Charm.Studio stores only the file's id and fetches it when someone opens the chat, so older photos show "no longer available". Download anything you need to keep. Sending limits: photos (JPG/PNG) 5 MB; videos, audio and documents (PDF, Word, Excel, PowerPoint, text) 16 MB.
 - Stickers use Helvetica (a built-in PDF font). It cannot draw non-Latin scripts such as Devanagari, so write those names in Latin letters.
