@@ -73,11 +73,19 @@ export const saveSettings = (section, data) => api.put(`/settings/${section}`, d
 export const getSystemStatus = () => api.get("/system/status").then((r) => r.data);
 
 // Orders
-export const exportOrdersCsv = async () => {
-  const res = await api.get("/orders/export.csv", { responseType: "blob" });
+// filters: a search string, or { q, phone, order_id, start, end } (start/end are Date objects); empty values are skipped
+const orderParams = (f = {}) => {
+  const p = typeof f === "string" ? { q: f } : { ...f };
+  if (p.start instanceof Date) p.start = p.start.toISOString();
+  if (p.end instanceof Date) p.end = p.end.toISOString();
+  if ((p.start || p.end) && p.tz === undefined) p.tz = -new Date().getTimezoneOffset(); // so order dates line up with this day
+  return Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== ""));
+};
+export const exportOrdersCsv = async (filters) => {
+  const res = await api.get("/orders/export.csv", { params: orderParams(filters), responseType: "blob" });
   downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "charm_orders.csv"));
 };
-export const getOrders = (q) => api.get("/orders", { params: q ? { q } : {} }).then((r) => r.data);
+export const getOrders = (filters) => api.get("/orders", { params: orderParams(filters) }).then((r) => r.data);
 export const createOrder = (data) => api.post("/orders", data).then((r) => r.data);
 export const updateOrder = (id, data) => api.patch(`/orders/${id}`, data).then((r) => r.data);
 export const deleteOrder = (id) => api.delete(`/orders/${id}`).then((r) => r.data);
@@ -147,9 +155,10 @@ export const sendInboxMedia = (numberLabel, to, file, caption) => {
 };
 
 // Order sheet PDF for a period (start/end are Date objects in the user's local time)
-export const downloadOrderSheet = async (start, end, title) => {
+// start/end: Date objects or null (no date filter); extra: { phone, order_id }
+export const downloadOrderSheet = async (start, end, title, extra = {}) => {
   const res = await api.get("/orders/sheet.pdf", {
-    params: { start: start.toISOString(), end: end.toISOString(), tz: -new Date().getTimezoneOffset(), title },
+    params: orderParams({ start, end, phone: extra.phone, order_id: extra.order_id, tz: -new Date().getTimezoneOffset(), title }),
     responseType: "blob",
   });
   downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "order_sheet.pdf"));

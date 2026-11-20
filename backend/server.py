@@ -19,7 +19,7 @@ import time
 import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -62,7 +62,7 @@ log = logging.getLogger("charm_studio")
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 ORDER_FIELDS = ("order_id", "product_name", "charm", "notes")
-ORDER_COLUMNS = "id, order_id, product_name, charm, notes, source, channel, created_at, customer_phone"
+ORDER_COLUMNS = "id, order_id, product_name, charm, notes, source, channel, created_at, customer_phone, order_date"
 ORDER_SELECT = ORDER_COLUMNS + ", confirmed_at"  # confirmed_at is set by sending a template, never inserted
 SOURCES = ("manual", "ai", "csv", "whatsapp")
 
@@ -725,6 +725,7 @@ class OrderIn(BaseModel):
     source: str = "manual"
     channel: str = ""
     customer_phone: str = ""
+    order_date: Optional[str] = None  # marketplace order date, e.g. 2026-11-19
 
 
 class OrderPatch(BaseModel):
@@ -735,6 +736,7 @@ class OrderPatch(BaseModel):
     source: Optional[str] = None
     channel: Optional[str] = None
     customer_phone: Optional[str] = None
+    order_date: Optional[str] = None  # "" clears it
 
 
 class BulkOrders(BaseModel):
@@ -767,6 +769,7 @@ def build_order(data: Dict[str, Any]) -> Dict[str, Any]:
         "channel": str(data.get("channel") or ""),
         "created_at": now_utc(),
         "customer_phone": re.sub(r"\D", "", str(data.get("customer_phone") or "")),
+        "order_date": parse_order_date(data.get("order_date")),
         "confirmed_at": None,
     }
 
@@ -774,11 +777,11 @@ def build_order(data: Dict[str, Any]) -> Dict[str, Any]:
 def order_args(d: Dict[str, Any]) -> tuple:
     return (
         d["id"], d["order_id"], d["product_name"], d["charm"], d["notes"],
-        d["source"], d["channel"], d["created_at"], d["customer_phone"],
+        d["source"], d["channel"], d["created_at"], d["customer_phone"], d["order_date"],
     )
 
 
-INSERT_ORDER_SQL = f"INSERT INTO orders ({ORDER_COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)"
+INSERT_ORDER_SQL = f"INSERT INTO orders ({ORDER_COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"
 
 
 async def insert_order(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -811,26 +814,77 @@ async def create_order(order: OrderIn):
     return await insert_order(order.model_dump())
 
 
-@api.get("/orders")
-async def list_orders(q: Optional[str] = None):
+def _like(text: str) -> str:
+    return "%" + re.sub(r"([\\%_])", r"\\\1", text) + "%"
+
+
+def order_filters(
+    q: Optional[str] = None,
+    phone: Optional[str] = None,
+    order_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    tz: int = 330,
+) -> tuple:
+    """SQL WHERE clause and args for the Orders filters (all optional, combined with AND)."""
+    conds: List[str] = []
+    args: List[Any] = []
     if q and q.strip():
-        like = "%" + re.sub(r"([\\%_])", r"\\\1", q.strip()) + "%"
-        rows = await db().fetch(
-            f"""SELECT {ORDER_SELECT} FROM orders
-                WHERE order_id ILIKE $1 OR product_name ILIKE $1 OR charm ILIKE $1 OR notes ILIKE $1
-                   OR customer_phone ILIKE $1
-                ORDER BY created_at DESC""",
-            like,
-        )
-        return [row_dict(r) for r in rows]
-    return await load_all_orders()
+        args.append(_like(q.strip()))
+        i = len(args)
+        conds.append(f"(order_id ILIKE ${i} OR product_name ILIKE ${i} OR charm ILIKE ${i} OR notes ILIKE ${i} OR customer_phone ILIKE ${i})")
+    if phone and phone.strip():
+        digits = re.sub(r"\D", "", phone)
+        if not digits:
+            raise HTTPException(400, "Phone filter: type the digits of the number.")
+        args.append(f"%{digits}%")
+        conds.append(f"customer_phone LIKE ${len(args)}")
+    if order_id and order_id.strip():
+        wanted = norm_id(order_id)  # same matching as Label Studio: ignore spaces, dashes and case
+        if not wanted:
+            raise HTTPException(400, "Order ID filter: type letters or digits of the ID.")
+        args.append(f"%{wanted}%")
+        conds.append(f"regexp_replace(upper(order_id), '[^A-Z0-9]', '', 'g') LIKE ${len(args)}")
+    # Dates: the marketplace order date when known, otherwise when the order was saved.
+    shift = timedelta(minutes=max(-720, min(tz, 840)))
+    if start:
+        t = _parse_when(start, "start")
+        args += [(t + shift).date(), t]
+        conds.append(f"((order_date IS NOT NULL AND order_date >= ${len(args) - 1}) OR (order_date IS NULL AND created_at >= ${len(args)}))")
+    if end:
+        t = _parse_when(end, "end")
+        args += [(t + shift).date(), t]
+        conds.append(f"((order_date IS NOT NULL AND order_date < ${len(args) - 1}) OR (order_date IS NULL AND created_at < ${len(args)}))")
+    return (" WHERE " + " AND ".join(conds)) if conds else "", args
+
+
+@api.get("/orders")
+async def list_orders(
+    q: Optional[str] = None,
+    phone: Optional[str] = None,
+    order_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    tz: int = 330,
+):
+    where, args = order_filters(q, phone, order_id, start, end, tz)
+    rows = await db().fetch(f"SELECT {ORDER_SELECT} FROM orders{where} ORDER BY created_at DESC", *args)
+    return [row_dict(r) for r in rows]
 
 
 @api.get("/orders/export.csv")
-async def export_orders_csv():
-    orders = await load_all_orders()
+async def export_orders_csv(
+    q: Optional[str] = None,
+    phone: Optional[str] = None,
+    order_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    tz: int = 330,
+):
+    where, args = order_filters(q, phone, order_id, start, end, tz)
+    orders = [row_dict(r) for r in await db().fetch(f"SELECT {ORDER_SELECT} FROM orders{where} ORDER BY created_at DESC", *args)]
     buf = io.StringIO()
-    cols = ["order_id", "product_name", "charm", "notes", "customer_phone", "source", "created_at"]
+    cols = ["order_id", "order_date", "product_name", "charm", "notes", "customer_phone", "source", "created_at"]
     writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     writer.writeheader()
     for o in orders:
@@ -850,14 +904,92 @@ def _parse_when(value: str, name: str) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def build_order_sheet(orders: List[Dict[str, Any]], heading: str, subtitle: str, tz_minutes: int) -> bytes:
-    """A4 table of orders: time, order ID, name to print, charm, notes, customer phone."""
+# ---------------------------------------------------------------------------
+# Marketplace order dates (from chats and shipping labels)
+# ---------------------------------------------------------------------------
+# The shop's time zone, for "today" and for turning saved times into dates (India by default).
+SHOP_UTC_OFFSET = timedelta(minutes=int(os.environ.get("SHOP_UTC_OFFSET_MINUTES", "330")))
+MONTHS = {m: i + 1 for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+
+
+def shop_today() -> date:
+    return (datetime.now(timezone.utc) + SHOP_UTC_OFFSET).date()
+
+
+def parse_order_date(value: Any) -> Optional[date]:
+    """A plausible order date from 2026-11-19, 19/11/2026, 19.11.26, 19-Nov-2026, 19 Nov 2026 or Nov 19, 2026."""
+    if isinstance(value, datetime):
+        d = value.date()
+    elif isinstance(value, date):
+        d = value
+    else:
+        text = str(value or "").strip().lower().replace(",", " ")
+        if not text:
+            return None
+        d = None
+        m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+        if m:
+            y, mo, da = int(m[1]), int(m[2]), int(m[3])
+        elif (m := re.fullmatch(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})", text)):
+            da, mo, y = int(m[1]), int(m[2]), int(m[3])  # Indian order: day first
+        elif (m := re.fullmatch(r"(\d{1,2})[\s./-]*([a-z]{3})[a-z]*[\s./-]*(\d{2,4})", text)):
+            da, mo, y = int(m[1]), MONTHS.get(m[2], 0), int(m[3])
+        elif (m := re.fullmatch(r"([a-z]{3})[a-z]*\s+(\d{1,2})\s+(\d{2,4})", text)):
+            mo, da, y = MONTHS.get(m[1], 0), int(m[2]), int(m[3])
+        else:
+            return None
+        if y < 100:
+            y += 2000
+        try:
+            d = date(y, mo, da)
+        except ValueError:
+            return None
+    today = shop_today()
+    if d.year < 2015 or d > today + timedelta(days=1):
+        return None  # not a believable order date
+    return d
+
+
+LABEL_DATE_RE = re.compile(
+    r"(?:order|invoice|ordered|purchase|placed)[\s_]*(?:date|dt|on)?\s*[:\-]?\s*"
+    r"(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}[\s./-]*[A-Za-z]{3,9}[\s./-]*\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4})",
+    re.IGNORECASE,
+)
+
+
+def detect_label_date(text: str) -> Optional[date]:
+    """The order date printed on a shipping label, preferring an 'Order Date' over an 'Invoice Date'."""
+    found = []
+    for m in LABEL_DATE_RE.finditer(text or ""):
+        d = parse_order_date(m.group(1))
+        if d:
+            found.append((0 if m.group(0).lower().startswith("order") else 1, d))
+    return sorted(found)[0][1] if found else None
+
+
+def order_date_or_saved(o: Dict[str, Any]) -> tuple:
+    """(date, from_marketplace) for an order: its marketplace date, else the date it was saved (shop time)."""
+    d = parse_order_date(o.get("order_date")) if o.get("order_date") else None
+    if d:
+        return d, True
+    saved = o.get("created_at")
+    saved = datetime.fromisoformat(saved) if isinstance(saved, str) else saved
+    return (saved + SHOP_UTC_OFFSET).date(), False
+
+
+def build_order_sheet(orders: List[Dict[str, Any]], heading: str, subtitle: str, tz_minutes: int = 330) -> bytes:
+    """A4 table of orders grouped under a heading per marketplace order date (or the saved date when unknown)."""
     width, height, margin = 595, 842, 36
-    cols = [("#", 20), ("Time", 44), ("Order ID", 108), ("Name on product", 92), ("Charm", 80), ("Notes", 111), ("Phone", 68)]
-    row_h, head_h, fs = 24, 18, 7.5
+    cols = [("#", 20), ("Order ID", 120), ("Name on product", 100), ("Charm", 86), ("Notes", 121), ("Phone", 76)]
+    row_h, head_h, group_h, fs = 22, 18, 20, 7.5
     stripe, rule, grey = (0.96, 0.95, 0.92), (0.88, 0.86, 0.82), (0.45, 0.45, 0.45)
-    shift = timedelta(minutes=tz_minutes)
-    multi_day = len({(datetime.fromisoformat(o["created_at"]) + shift).date() for o in orders}) > 1
+    tint = (0.91, 0.94, 0.89)
+    keyed = []
+    for o in orders:
+        d, real = order_date_or_saved(o)
+        keyed.append((d, str(o.get("created_at") or ""), real, o))
+    keyed.sort(key=lambda k: (k[0], k[1]))
+    any_saved = any(not real for _, _, real, _ in keyed)
     doc = fitz.open()
 
     def new_page(first: bool):
@@ -876,17 +1008,28 @@ def build_order_sheet(orders: List[Dict[str, Any]], heading: str, subtitle: str,
 
     page, y = new_page(True)
     if not orders:
-        page.insert_text((margin, y + 22), "No orders in this period.", fontname="helv", fontsize=10, color=grey)
-    for i, o in enumerate(orders):
+        page.insert_text((margin, y + 22), "No orders match.", fontname="helv", fontsize=10, color=grey)
+    counts: Dict[date, int] = {}
+    for d, _, _, _ in keyed:
+        counts[d] = counts.get(d, 0) + 1
+    current, n_in_group = None, 0
+    for i, (d, _, real, o) in enumerate(keyed):
+        if d != current:  # date heading
+            if y + group_h + row_h > height - margin - 16:
+                page, y = new_page(False)
+            page.draw_rect(fitz.Rect(margin, y, width - margin, y + group_h), color=None, fill=tint)
+            label = f"{d.strftime('%A, %d %b %Y')}  ·  {counts[d]} order{'s' if counts[d] != 1 else ''}"
+            page.insert_text((margin + 6, y + 13.5), label, fontname="hebo", fontsize=8.5, color=GREEN)
+            y += group_h
+            current, n_in_group = d, 0
         if y + row_h > height - margin - 16:
             page, y = new_page(False)
-        if i % 2:
+        if n_in_group % 2:
             page.draw_rect(fitz.Rect(margin, y, width - margin, y + row_h), color=None, fill=stripe)
-        when = datetime.fromisoformat(o["created_at"]) + shift
+        n_in_group += 1
         values = [
             str(i + 1),
-            when.strftime("%d %b %H:%M" if multi_day else "%H:%M"),
-            o.get("order_id") or "-",
+            (o.get("order_id") or "-") + ("" if real else " *"),
             o.get("product_name") or "-",
             o.get("charm") or "-",
             o.get("notes") or "",
@@ -901,29 +1044,60 @@ def build_order_sheet(orders: List[Dict[str, Any]], heading: str, subtitle: str,
         page.draw_line((margin, y + row_h), (width - margin, y + row_h), color=rule, width=0.5)
         y += row_h
     for n, pg in enumerate(doc):
+        if any_saved:
+            pg.insert_text((margin, height - 18), "* Order date not found on the chat or label yet, so it's listed under the date it was saved.",
+                           fontname="helv", fontsize=6.5, color=grey)
         pg.insert_text((width - margin - 60, height - 18), f"Page {n + 1} of {doc.page_count}", fontname="helv", fontsize=7, color=grey)
     out = doc.tobytes(garbage=3, deflate=True)
     doc.close()
     return out
 
 
+SHEET_MAX_ROWS = 3000
+
+
 @api.get("/orders/sheet.pdf")
-async def orders_sheet(start: str, end: str, tz: int = 0, title: str = ""):
-    """Order sheet PDF for orders created between `start` and `end` (ISO datetimes).
+async def orders_sheet(
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    tz: int = 0,
+    title: str = "",
+    phone: Optional[str] = None,
+    order_id: Optional[str] = None,
+):
+    """Order sheet PDF for orders matching the filters: a period (`start`/`end`, ISO datetimes, up to 3 months),
+    a customer `phone` and/or an `order_id`; at least one is needed.
     `tz` = minutes to add to UTC for printed times (the browser sends its own offset)."""
-    begin, finish = _parse_when(start, "start"), _parse_when(end, "end")
-    if finish <= begin or finish - begin > timedelta(days=93):
-        raise HTTPException(400, "Choose a period of up to 3 months.")
+    if bool(start) != bool(end):
+        raise HTTPException(400, "Give both a start and an end date, or neither.")
+    if start:
+        begin, finish = _parse_when(start, "start"), _parse_when(end, "end")
+        if finish <= begin or finish - begin > timedelta(days=93):
+            raise HTTPException(400, "Choose a period of up to 3 months.")
+    elif not ((phone or "").strip() or (order_id or "").strip()):
+        raise HTTPException(400, "Choose a date, a phone number or an order ID for the sheet.")
     tz = max(-720, min(tz, 840))
+    where, args = order_filters(None, phone, order_id, start, end, tz)
     rows = await db().fetch(
-        f"SELECT {ORDER_SELECT} FROM orders WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at ASC",
-        begin, finish,
+        f"SELECT {ORDER_SELECT} FROM orders{where} ORDER BY created_at ASC LIMIT {SHEET_MAX_ROWS + 1}", *args
     )
+    if len(rows) > SHEET_MAX_ROWS:
+        raise HTTPException(400, f"That's more than {SHEET_MAX_ROWS} orders. Narrow it down with a date.")
     orders = [row_dict(r) for r in rows]
     shop = (SETTINGS.get("shop") or {}).get("shop_name") or "Charm.Studio"
-    period = title.strip()[:60] or (begin + timedelta(minutes=tz)).strftime("%d %b %Y")
-    pdf = build_order_sheet(orders, f"{shop} - order sheet", f"{period}  ·  {len(orders)} order{'s' if len(orders) != 1 else ''}", tz)
-    stamp = (begin + timedelta(minutes=tz)).strftime("%Y-%m-%d")
+    parts = [title.strip()[:60]] if title.strip() else []
+    if not parts and start:
+        parts.append((begin + timedelta(minutes=tz)).strftime("%d %b %Y"))
+    if phone and phone.strip() and not title.strip():
+        parts.append(f"phone {phone.strip()}")
+    if order_id and order_id.strip() and not title.strip():
+        parts.append(f"order {order_id.strip()}")
+    parts.append(f"{len(orders)} order{'s' if len(orders) != 1 else ''}")
+    pdf = build_order_sheet(orders, f"{shop} - order sheet", "  ·  ".join(parts), tz)
+    if start:
+        stamp = (begin + timedelta(minutes=tz)).strftime("%Y-%m-%d")
+    else:
+        stamp = re.sub(r"[^A-Za-z0-9_-]+", "", (order_id or phone or "filtered").strip())[:30] or "filtered"
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="order_sheet_{stamp}.pdf"'})
 
@@ -946,6 +1120,11 @@ async def update_order(oid: str, patch: OrderPatch):
         raise HTTPException(400, "No fields to update")
     if "customer_phone" in changes:
         changes["customer_phone"] = re.sub(r"\D", "", changes["customer_phone"])
+    if "order_date" in changes:
+        raw = changes["order_date"]
+        changes["order_date"] = parse_order_date(raw) if raw else None
+        if raw and changes["order_date"] is None:
+            raise HTTPException(400, "Order date doesn't look right. Use a date like 2026-11-19.")
     cols = list(changes.keys())  # keys come from the pydantic model, never from user input
     sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
     row = await db().fetchrow(
@@ -1023,14 +1202,16 @@ _ai_client: Optional[AsyncAnthropic] = None
 
 EXTRACT_SYSTEM = (
     "You extract customised-charm orders from WhatsApp chat text. Return ONLY a JSON array of "
-    "objects with keys order_id, product_name (name to print on product), charm, notes. Use empty "
-    "strings for unknown fields. No prose."
+    "objects with keys order_id, product_name (name to print on product), charm, notes, order_date (the date "
+    "the order was placed on Meesho/Flipkart as YYYY-MM-DD, only if the chat states it; relative dates like "
+    "'yesterday' use the 'Today' line). Use empty strings for unknown fields. No prose."
 )
 
 BOT_EXTRACT_SYSTEM = (
     "You extract order details from a single WhatsApp message sent by a customer ordering a "
     "customised charm. Return ONLY a JSON object with keys order_id, product_name (name to print "
-    "on product), charm, notes. Use empty strings for anything not stated. No prose."
+    "on product), charm, notes, order_date (when the order was placed on Meesho/Flipkart, YYYY-MM-DD, only if "
+    "stated; relative dates use the 'Today' line). Use empty strings for anything not stated. No prose."
 )
 
 
@@ -1117,7 +1298,12 @@ def _clean_row(row: Any) -> Optional[Dict[str, str]]:
     if not isinstance(row, dict):
         return None
     out = {f: str(row.get(f) or "").strip() for f in ORDER_FIELDS}
-    return out if any(out.values()) else None
+    if not any(out.values()):
+        return None
+    d = parse_order_date(row.get("order_date"))
+    if d:
+        out["order_date"] = d.isoformat()
+    return out
 
 
 def parse_json_any(text: str) -> Any:
@@ -1167,7 +1353,7 @@ def dedupe_orders(rows: List[Dict[str, str]]):
         if key and key in index:
             dupes += 1
             target = merged[index[key]]
-            for f in ORDER_FIELDS:
+            for f in ORDER_FIELDS + ("order_date",):
                 if not target.get(f) and r.get(f):
                     target[f] = r[f]
             continue
@@ -1222,7 +1408,7 @@ async def extract(payload: ExtractIn):
         raise HTTPException(400, "Text is empty")
     model, effort = extract_settings(payload.model, payload.effort)
     try:
-        raw = await claude_text(EXTRACT_SYSTEM, payload.text, model=model, effort=effort)
+        raw = await claude_text(EXTRACT_SYSTEM, f"Today: {shop_today().isoformat()}\n\n{payload.text}", model=model, effort=effort)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -1242,7 +1428,7 @@ async def extract_bulk_file(file: UploadFile = File(...), model: str = Form(""),
 
     async def run(chunk: str) -> List[Dict[str, str]]:
         async with sem:
-            return parse_orders(await claude_text(EXTRACT_SYSTEM, chunk, model=model, effort=effort))
+            return parse_orders(await claude_text(EXTRACT_SYSTEM, f"Today: {shop_today().isoformat()}\n\n{chunk}", model=model, effort=effort))
 
     try:
         results = await asyncio.gather(*(run(c) for c in chunks))
@@ -1282,14 +1468,43 @@ def ids_match(a: str, b: str) -> bool:
     return any(short[i : i + 8] in long_ for i in range(len(short) - 7))
 
 
+# "Order No. 904018861570", "Order Id: OD4390...", "Order Number - 1234567_1" (labels from any channel, and chats)
+LABELLED_ID_RE = re.compile(r"\border\s*(?:no|id|number|num|#)\b\.?\s*[:#\-]?\s*([A-Z]{0,4}\d[0-9A-Z_\-]{5,})", re.IGNORECASE)
+
+
 def detect_ids(text: str) -> List[str]:
+    """Order IDs in label or chat text: labelled ones first, then Meesho/Flipkart patterns.
+    Bare long numbers (often courier AWB or invoice numbers) are only used when nothing better is found."""
     found: List[str] = []
-    for pattern in ID_PATTERNS:
-        for m in pattern.findall(text):
-            # skip fallback hits that are just part of an already-detected id
-            if m in found or any(m in f for f in found):
-                continue
-            found.append(m)
+
+    def add(m: str) -> None:
+        m = m.strip("-_")
+        if sum(ch.isdigit() for ch in m) < 8:  # real order IDs have 12+ digits; SKU codes like 0911-10 don't count
+            return
+        # skip hits that are just part of an already-detected id (e.g. Meesho's "Purchase Order No." without _1)
+        if m in found or any(m in f for f in found):
+            return
+        for k, f in enumerate(found):
+            if f in m:  # the longer, more exact form (e.g. with "_1") replaces the shorter one in its place
+                found[k] = m
+                return
+        found.append(m)
+
+    for pattern in ID_PATTERNS[:2]:  # Meesho sub-order IDs, Flipkart OD numbers: the most reliable
+        for m in pattern.findall(text or ""):
+            add(m)
+    if not found:  # other channels: the number printed after "Order No." / "Order Id"
+        for m in LABELLED_ID_RE.findall(text or ""):
+            if sum(ch.isdigit() for ch in m) >= 10:  # SKU codes under an "Order No." heading are shorter
+                add(m)
+    if not found:
+        for m in ID_PATTERNS[2].findall(text or ""):  # fallback: any long number
+            add(m)
+    if len(found) > 1:
+        # SKU codes can look like short Meesho IDs (e.g. 1671380291_8); real IDs on the page are much longer
+        digits = lambda v: sum(ch.isdigit() for ch in v)  # noqa: E731
+        longest = max(digits(f) for f in found)
+        found = sorted((f for f in found if digits(f) >= longest - 5), key=digits, reverse=True)
     return found
 
 
@@ -1321,9 +1536,11 @@ async def pdf_analyze(file: UploadFile = File(...)):
     summary = {"total_pages": doc.page_count, "matched": 0, "not_found": 0, "no_id": 0}
     try:
         for i, page in enumerate(doc):
-            detected = detect_ids(page.get_text())
+            text = page.get_text()
+            detected = detect_ids(text)
             matches = match_orders(detected, orders) if detected else []
             status = "matched" if matches else ("not_found" if detected else "no_id")
+            label_date = detect_label_date(text)
             summary[status] += 1
             pix = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5))
             pages.append(
@@ -1331,6 +1548,7 @@ async def pdf_analyze(file: UploadFile = File(...)):
                     "page": i + 1,
                     "detected_ids": detected,
                     "matches": matches,
+                    "label_date": label_date.isoformat() if label_date else None,
                     "status": status,
                     "thumbnail": "data:image/png;base64," + base64.b64encode(pix.tobytes("png")).decode(),
                 }
@@ -1362,16 +1580,112 @@ def fit_width(text: str, width: float, font: str, size: float) -> str:
     return text.rstrip() + ELLIPSIS
 
 
-def draw_sticker(page: fitz.Page, position: str, header: str, lines: List[str], color, font_size: float):
-    """Compact corner sticker, kept small so it never covers the barcode."""
-    width, margin, pad = 180.0, 14.0, 4.0
-    header_h = font_size + 6
-    line_h = font_size + 3
-    height = header_h + pad * 2 + line_h * len(lines) - 3
+def page_content_boxes(page: fitz.Page) -> List[fitz.Rect]:
+    """Where the page has something that must stay readable: text, images, barcodes/QR codes (filled shapes).
+    Plain stroked lines (borders, table rules) don't count, so the sticker may sit inside an empty table cell."""
+    boxes: List[fitz.Rect] = []
+    for b in page.get_text("blocks"):
+        if str(b[4]).strip():
+            boxes.append(fitz.Rect(b[:4]))
+    for info in page.get_image_info():
+        boxes.append(fitz.Rect(info["bbox"]))
+    try:
+        thin: List[fitz.Rect] = []
+        for d in page.get_drawings():
+            if d.get("fill") is None or d.get("fill") == (1.0, 1.0, 1.0):
+                continue
+            r = fitz.Rect(d["rect"])
+            if r.width >= page.rect.width * 0.9 and r.height >= page.rect.height * 0.9:
+                continue  # full-page background
+            if min(r.width, r.height) < 2.0:
+                thin.append(r)  # a table rule, or one bar of a vector barcode: decided below
+            else:
+                boxes.append(r)
+        boxes.extend(_barcode_groups(thin))
+    except Exception:  # noqa: BLE001 - unusual PDFs: fall back to text and images only
+        pass
+    return [b + (-2, -2, 2, 2) for b in boxes if not b.is_empty]
+
+
+def _barcode_groups(thin: List[fitz.Rect], gap: float = 3.0, min_bars: int = 6) -> List[fitz.Rect]:
+    """Thin filled shapes that sit side by side in a crowd are a barcode (kept); lone ones are table rules (ignored)."""
+    if len(thin) < min_bars:
+        return []
+    parent = list(range(len(thin)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    grown = [r + (-gap, -gap, gap, gap) for r in thin]
+    cells: Dict[tuple, List[int]] = {}
+    for i, r in enumerate(grown):  # bucket by 20pt cells so we only compare neighbours
+        for cx in range(int(r.x0 // 20), int(r.x1 // 20) + 1):
+            for cy in range(int(r.y0 // 20), int(r.y1 // 20) + 1):
+                for j in cells.get((cx, cy), []):
+                    if grown[j].intersects(r):
+                        parent[find(i)] = find(j)
+                cells.setdefault((cx, cy), []).append(i)
+    groups: Dict[int, List[int]] = {}
+    for i in range(len(thin)):
+        groups.setdefault(find(i), []).append(i)
+    out = []
+    for members in groups.values():
+        if len(members) >= min_bars:
+            box = fitz.Rect(thin[members[0]])
+            for m in members[1:]:
+                box |= thin[m]
+            # a long frame made of a few touching rules isn't a barcode: barcodes are many short bars
+            if len(members) >= min_bars and box.width < 400 and box.height < 400:
+                out.append(box)
+    return out
+
+
+def sticker_box(page: fitz.Page, position: str, width: float, height: float, margin: float) -> Optional[fitz.Rect]:
+    """The free spot of this size nearest to the chosen corner, or None if the page has no room."""
     r = page.rect
-    x0 = r.x1 - margin - width if "right" in position else r.x0 + margin
-    y0 = r.y1 - margin - height if "bottom" in position else r.y0 + margin
-    box = fitz.Rect(x0, y0, x0 + width, y0 + height)
+    boxes = page_content_boxes(page)
+    want_x = r.x1 - margin - width if "right" in position else r.x0 + margin
+    want_y = r.y1 - margin - height if "bottom" in position else r.y0 + margin
+    step = 4.0
+    xs = [r.x0 + margin + i * step for i in range(int((r.width - 2 * margin - width) // step) + 1)]
+    ys = [r.y0 + margin + i * step for i in range(int((r.height - 2 * margin - height) // step) + 1)]
+    for x, y in sorted(((x, y) for x in xs for y in ys), key=lambda c: (abs(c[0] - want_x) + abs(c[1] - want_y))):
+        cand = fitz.Rect(x, y, x + width, y + height)
+        if not any(cand.intersects(b) for b in boxes):
+            return cand
+    return None
+
+
+def draw_sticker(page: fitz.Page, position: str, header: str, lines: List[str], color, font_size: float):
+    """Compact customisation sticker, placed in empty space near the chosen corner so it never covers
+    the address, barcodes or QR codes. It shrinks to fit small (e.g. 4x6 inch) labels."""
+    r = page.rect
+    scale = min(1.0, r.width / 420.0)  # A4 = full size; a 4x6 label (~288 wide) gets a smaller sticker
+    margin = 14.0 * max(scale, 0.45)
+    box = None
+    for fs in [round(font_size * max(scale, 0.7), 1), max(5.0, round(font_size * 0.7, 1)), 5.0]:
+        pad = 4.0 if fs >= 6 else 3.0
+        header_h, line_h = fs + 6, fs + 3
+        longest = max([fitz.get_text_length(header, "hebo", fs)] + [fitz.get_text_length(t, "helv", fs) for t in lines])
+        width = min(180.0, max(r.width * 0.36, min(longest + pad * 2 + 2, r.width * 0.55)))
+        height = header_h + pad * 2 + line_h * len(lines) - 3
+        box = sticker_box(page, position, width, height, margin)
+        if box:
+            font_size = fs
+            break
+    if box is None:
+        # no empty space anywhere: use the chosen corner at the smallest size (rare; check these labels by hand)
+        font_size, pad = 5.0, 3.0
+        header_h, line_h = font_size + 6, font_size + 3
+        width = min(180.0, r.width * 0.5)
+        height = header_h + pad * 2 + line_h * len(lines) - 3
+        x0 = r.x1 - margin - width if "right" in position else r.x0 + margin
+        y0 = r.y1 - margin - height if "bottom" in position else r.y0 + margin
+        box = fitz.Rect(x0, y0, x0 + width, y0 + height)
+    x0, y0, width = box.x0, box.y0, box.width
 
     page.draw_rect(box, color=color, fill=WHITE, width=0.8, overlay=True)
     page.draw_rect(fitz.Rect(x0, y0, x0 + width, y0 + header_h), color=color, fill=color, width=0.8, overlay=True)
@@ -1389,6 +1703,161 @@ def draw_sticker(page: fitz.Page, position: str, header: str, lines: List[str], 
             overlay=True,
         )
         y += line_h
+
+
+# ---------------------------------------------------------------------------
+# Label layout: customisation box right below each label
+# ---------------------------------------------------------------------------
+BOX_GAP = 8.0  # space between the label and the customisation box
+A4_W, A4_H = 595.0, 842.0
+
+
+def box_height(n_lines: int, fs: float) -> float:
+    pad = 4.0 if fs >= 6 else 3.0
+    return (fs + 6) + pad * 2 + (fs + 3) * n_lines - 3
+
+
+def draw_box(page: fitz.Page, x0: float, y0: float, width: float, header: str, lines: List[str], color, fs: float) -> None:
+    """The customisation box: a coloured header bar and one line per detail."""
+    pad = 4.0 if fs >= 6 else 3.0
+    header_h, line_h = fs + 6, fs + 3
+    height = box_height(len(lines), fs)
+    page.draw_rect(fitz.Rect(x0, y0, x0 + width, y0 + height), color=color, fill=WHITE, width=0.8, overlay=True)
+    page.draw_rect(fitz.Rect(x0, y0, x0 + width, y0 + header_h), color=color, fill=color, width=0.8, overlay=True)
+    page.insert_text((x0 + pad, y0 + header_h - 3.5), header, fontname="hebo", fontsize=fs, color=WHITE, overlay=True)
+    y = y0 + header_h + pad + fs - 1
+    for line in lines:
+        page.insert_text((x0 + pad, y), fit_width(line, width - pad * 2, "helv", fs), fontname="helv", fontsize=fs, color=INK, overlay=True)
+        y += line_h
+
+
+def _rule_below(page: fitz.Page, y: float, within: float = 14.0) -> float:
+    """y of the border line just under y (the label's bottom edge), or y itself."""
+    best = None
+    try:
+        for d in page.get_drawings():
+            r = fitz.Rect(d["rect"])
+            if r.height < 2.0 and r.width > 100 and y - 1 <= r.y0 <= y + within:
+                best = r.y1 if best is None else min(best, r.y1)
+    except Exception:  # noqa: BLE001
+        pass
+    return best if best is not None else y + 3
+
+
+def label_bottom(page: fitz.Page) -> Optional[float]:
+    """Where the shipping label ends on an A4 label+invoice page (Flipkart, Meesho), or None if unknown."""
+    blocks = [b for b in page.get_text("blocks") if str(b[4]).strip()]
+    flip = [b for b in blocks if re.search(r"printed at|not for resale", b[4], re.IGNORECASE)]
+    if flip:
+        return _rule_below(page, max(b[3] for b in flip))
+    pd = [b for b in blocks if "product details" in b[4].lower()]
+    if pd:
+        top = min(b[1] for b in pd)
+        row = [b for b in blocks if top - 1 <= b[1] <= top + 45]  # "Product Details" title, column names and the values row
+        return _rule_below(page, max(b[3] for b in row))
+    return None
+
+
+def _label_left(page: fitz.Page, bottom: float) -> float:
+    xs = [b[0] for b in page.get_text("blocks") if str(b[4]).strip() and b[3] <= bottom]
+    return max(page.rect.x0 + 10, min(xs) - 4) if xs else page.rect.x0 + 14
+
+
+def _a4_page_with_box(out: fitz.Document, src: fitz.Document, pno: int, stamp: Optional[tuple], fs: float) -> bool:
+    """New page: the label, the box right below it (with a gap), then the rest of the page moved down.
+    Returns False if the label's end can't be found (the caller then uses the old corner sticker)."""
+    page = src[pno]
+    lb = label_bottom(page)
+    if lb is None:
+        return False
+    W, H = page.rect.width, page.rect.height
+    new = out.new_page(width=W, height=H)
+    new.show_pdf_page(fitz.Rect(0, 0, W, lb), src, pno, clip=fitz.Rect(0, 0, W, lb))
+    below = [b for b in page_content_boxes(page) if b.y0 >= lb - 1]
+    shift = (BOX_GAP + box_height(len(stamp[1]), fs) + BOX_GAP) if stamp else 0
+    if below:
+        rest_bottom = min(H, max(b.y1 for b in below) + 2)
+        top = lb + shift
+        avail = H - 6 - top
+        clip = fitz.Rect(0, lb, W, rest_bottom)
+        dest = fitz.Rect(0, top, W, top + min(clip.height, avail))
+        new.show_pdf_page(dest, src, pno, clip=clip)  # shrinks a little only when it wouldn't fit
+    if stamp:
+        header, lines, color = stamp
+        x0 = _label_left(page, lb)
+        draw_box(new, x0, lb + BOX_GAP, min(200.0, W - x0 - 10), header, lines, color, fs)
+    return True
+
+
+def _small_label_fit(w: float, h: float, n_lines: int, fs: float, margin: float = 3.0) -> float:
+    """Scale that fits one small label plus its box in a quarter of an A4 sheet."""
+    cell_w, cell_h = A4_W / 2, A4_H / 2
+    return min(1.0, (cell_w - 2 * margin) / w, (cell_h - 2 * margin - BOX_GAP - box_height(n_lines, fs)) / h)
+
+
+def build_label_pdf(src: fitz.Document, stamps: List[Optional[tuple]], position: str, font_size: float) -> bytes:
+    """The PDF to print. A4 label pages get the box right below the label; small labels (e.g. Flipkart 4x6) are laid
+    out 4 per A4 sheet with the box under each; other pages fall back to the corner sticker. stamps[i] is
+    (header, lines, colour) for page i, or None for no box."""
+    out = fitz.open()
+    small_fs = min(font_size, 7.5)
+    n_lines = 3
+    queue: List[tuple] = []  # small labels waiting to be put 4 per sheet: (page number, scale)
+
+    def flush() -> None:
+        while queue:
+            group, queue[:] = queue[:4], queue[4:]
+            sheet = out.new_page(width=A4_W, height=A4_H)
+            for k, (pno, scale) in enumerate(group):
+                pg = src[pno]
+                w, h = pg.rect.width * scale, pg.rect.height * scale
+                cx, cy = (k % 2) * A4_W / 2, (k // 2) * A4_H / 2
+                x0, y0 = cx + (A4_W / 2 - w) / 2, cy + 3
+                sheet.show_pdf_page(fitz.Rect(x0, y0, x0 + w, y0 + h), src, pno)
+                if stamps[pno]:
+                    header, lines, color = stamps[pno]
+                    draw_box(sheet, x0, y0 + h + BOX_GAP, w, header, lines, color, small_fs)
+            # light cut guides between the four labels
+            grey = (0.75, 0.75, 0.75)
+            sheet.draw_line((A4_W / 2, 6), (A4_W / 2, A4_H - 6), color=grey, width=0.4, dashes="[3 3] 0")
+            if len(group) > 2:
+                sheet.draw_line((6, A4_H / 2), (A4_W - 6, A4_H / 2), color=grey, width=0.4, dashes="[3 3] 0")
+
+    for pno in range(src.page_count):
+        page = src[pno]
+        w, h = page.rect.width, page.rect.height
+        stamp = stamps[pno]
+        if w < 400 and h < 650:  # a small shipping label
+            scale = _small_label_fit(w, h, n_lines, small_fs)
+            if scale >= 0.9:
+                queue.append((pno, scale))
+                continue
+            flush()
+            # too big for 4 per sheet: keep it on its own page, box right below where the label's content ends
+            # (the page is made taller only when there's no blank space left under the label)
+            bh = box_height(n_lines, small_fs)
+            boxes = page_content_boxes(page)
+            content_bottom = max((b.y1 for b in boxes), default=h)
+            fits = stamp and content_bottom + BOX_GAP + bh <= h - 4
+            extra = 0 if (fits or not stamp) else (BOX_GAP + bh + 8)
+            new = out.new_page(width=w, height=h + extra)
+            new.show_pdf_page(fitz.Rect(0, 0, w, h), src, pno)
+            if stamp:
+                left = max(6.0, min((b.x0 for b in boxes), default=6.0))
+                right = min(w - 6, max((b.x1 for b in boxes), default=w - 6))
+                y = content_bottom + BOX_GAP if fits else h + BOX_GAP
+                draw_box(new, left, y, max(120.0, right - left), stamp[0], stamp[1], stamp[2], small_fs)
+            continue
+        flush()
+        if _a4_page_with_box(out, src, pno, stamp, font_size):
+            continue
+        out.insert_pdf(src, from_page=pno, to_page=pno)
+        if stamp:
+            draw_sticker(out[-1], position, stamp[0], stamp[1], stamp[2], font_size)
+    flush()
+    data = out.tobytes(garbage=3, deflate=True)
+    out.close()
+    return data
 
 
 @api.post("/pdf/annotate")
@@ -1414,11 +1883,13 @@ async def pdf_annotate(
     by_uuid = {o["id"]: o for o in orders}
     by_order_id = {norm_id(o.get("order_id", "")): o for o in reversed(orders) if o.get("order_id")}
 
-    matched = not_found = 0
+    matched = not_found = dates_saved = 0
+    stamps: List[Optional[tuple]] = []
     try:
         for i, page in enumerate(doc):
             pno = str(i + 1)
-            detected = detect_ids(page.get_text())
+            text = page.get_text()
+            detected = detect_ids(text)
             order = None
             if pno in override_map:
                 ov = override_map[pno]
@@ -1429,9 +1900,16 @@ async def pdf_annotate(
 
             if order:
                 matched += 1
-                draw_sticker(
-                    page,
-                    position,
+                label_date = detect_label_date(text)
+                if label_date and not order.get("order_date"):
+                    # remember the marketplace order date printed on the label (never overwrites one already saved)
+                    res = await db().execute(
+                        "UPDATE orders SET order_date = $2 WHERE id = $1 AND order_date IS NULL", order["id"], label_date
+                    )
+                    if res.endswith(" 1"):
+                        dates_saved += 1
+                        order["order_date"] = label_date
+                stamps.append((
                     "CUSTOMISATION",
                     [
                         f"Name: {truncate(order.get('product_name') or '-')}",
@@ -1439,14 +1917,15 @@ async def pdf_annotate(
                         f"Notes: {truncate(order.get('notes') or '-')}",
                     ],
                     GREEN,
-                    font_size,
-                )
+                ))
             else:
                 not_found += 1
-                if not skip_unmatched:
+                if skip_unmatched:
+                    stamps.append(None)
+                else:
                     detail = f"ID: {truncate(detected[0], 34)}" if detected else "No order ID detected"
-                    draw_sticker(page, position, "ORDER NOT FOUND", [detail], RED, font_size)
-        out = doc.tobytes(garbage=3, deflate=True)
+                    stamps.append(("ORDER NOT FOUND", [detail, "Check the order in Charm.Studio", ""], RED))
+        out = build_label_pdf(doc, stamps, position, font_size)
     finally:
         doc.close()
 
@@ -1459,6 +1938,7 @@ async def pdf_annotate(
             "Content-Disposition": f'attachment; filename="annotated_{safe}.pdf"',
             "X-Matched-Pages": str(matched),
             "X-Not-Found-Pages": str(not_found),
+            "X-Order-Dates-Saved": str(dates_saved),
         },
     )
 
@@ -1644,7 +2124,7 @@ def _msg_time(msg: Dict[str, Any]) -> datetime:
 
 async def ai_extract_message(text: str) -> Dict[str, str]:
     try:
-        raw = await claude_text(BOT_EXTRACT_SYSTEM, text, max_tokens=2000, effort="low")
+        raw = await claude_text(BOT_EXTRACT_SYSTEM, f"Today: {shop_today().isoformat()}\n\n{text}", max_tokens=2000, effort="low")
     except Exception:  # noqa: BLE001
         log.exception("Bot AI extraction failed")
         return {}
@@ -1708,6 +2188,8 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
                 "notes": fields.get("notes", ""),
                 "source": "whatsapp",
                 "channel": biz,
+                "customer_phone": customer,
+                "order_date": fields.get("order_date"),
             }
         )
         await db().execute(
@@ -1733,7 +2215,9 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
 CHAT_EXTRACT_SYSTEM = (
     "You read WhatsApp messages that one customer sent to a shop selling customised charms. "
     "Return ONLY a JSON array with one object per distinct order, keys order_id (the marketplace order or "
-    "sub-order ID exactly as written), product_name (the name to print on the product), charm, notes. "
+    "sub-order ID exactly as written), product_name (the name to print on the product), charm, notes, "
+    "order_date (the date the order was placed on Meesho/Flipkart as YYYY-MM-DD, only if the customer says it; "
+    "relative dates like 'kal'/'yesterday' use the 'Today' line). "
     "Use empty strings for unknown fields. If there are no order details, return []. No prose."
 )
 READ_DEBOUNCE_S = float(os.environ.get("READ_DEBOUNCE_SECONDS", "20"))
@@ -1764,6 +2248,8 @@ async def save_extracted_order(label: str, customer: str, row: Dict[str, str]) -
             {**row, "source": "whatsapp", "channel": label, "customer_phone": customer}
         )
     changes = {f: row[f] for f in ("product_name", "charm", "notes") if row.get(f) and not existing[f]}
+    if row.get("order_date") and not existing["order_date"]:
+        changes["order_date"] = parse_order_date(row["order_date"])
     if not existing["customer_phone"]:
         changes["customer_phone"] = customer
     if not changes:
@@ -1791,7 +2277,8 @@ async def read_order_details(label: str, customer: str) -> Dict[str, Any]:
     used_ai = False
     if ai_ready():
         try:
-            found = parse_orders(await claude_text(CHAT_EXTRACT_SYSTEM, transcript, max_tokens=2000, effort="low"))
+            found = parse_orders(await claude_text(
+                CHAT_EXTRACT_SYSTEM, f"Today: {shop_today().isoformat()}\n\n{transcript}", max_tokens=2000, effort="low"))
             used_ai = True
         except Exception:  # noqa: BLE001
             log.exception("AI order reading failed; falling back to order-ID patterns")
@@ -2980,5 +3467,5 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Matched-Pages", "X-Not-Found-Pages", "Content-Disposition"],
+    expose_headers=["X-Matched-Pages", "X-Not-Found-Pages", "X-Order-Dates-Saved", "Content-Disposition"],
 )

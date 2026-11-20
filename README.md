@@ -7,9 +7,9 @@ Charm.Studio is for a small seller who takes customised-charm orders on WhatsApp
 ## Features
 
 - **Chats (team inbox):** every customer chat from your WhatsApp numbers in one place. Search by phone, name, order ID or anything the customer wrote. Each chat shows the orders the bot saved for that customer, which staff can edit, and staff reply from the app through the business number (WhatsApp allows free-form replies within 24 hours of the customer's last message; after that, or to start a chat, staff send an approved **template**). Customers' photos, voice notes, videos, stickers and files show in the chat, and staff can send photos, PDFs and other files (paperclip button, or paste an image). Messages your team sends from the WhatsApp Business phone app show up too (coexistence). One shared login.
-- **Orders:** add, search (also by customer phone), edit and delete orders inline; import and export CSV; delete all (with confirmation). **Order sheet PDF:** a printable table of every order received today, yesterday or in a date range. **Send confirmation:** sends your approved order-confirmation template on WhatsApp, filled in from the order, and marks the order confirmed.
+- **Orders:** add, search, edit and delete orders inline; import and export CSV; delete all (with confirmation). **Filters:** by date (any day, today, yesterday, one date or a range), customer phone and order ID (partial matches; spaces, dashes and +91 ignored); Export CSV follows the filters. **Order date:** the Meesho/Flipkart order date, read from the customer's chat by the bot or from the shipping label in Label Studio (never overwrites one already saved); date filters use it, or the date the order was saved when it isn't known yet. **Order sheet PDF:** a printable table for a date, a range, a phone number or an order ID, grouped under a heading per order date. **Send confirmation:** sends your approved order-confirmation template on WhatsApp, filled in from the order, and marks the order confirmed.
 - **WhatsApp Extract:** paste chat text, or upload an exported chat `.txt`, and AI turns it into orders you can edit before saving. Large chats are split into chunks and duplicates are merged. Staff pick the **model** (Claude Haiku 5.5 or Sonnet 5.5) and **effort** for each run, with a rough cost hint; "Default" uses the server's `ANTHROPIC_EXTRACT_MODEL` / `ANTHROPIC_EXTRACT_EFFORT`, and the choice is remembered in each browser.
-- **Label Studio:** drop in a label PDF and see each page's detected Order ID and matched order. Fix unmatched pages by hand, then download a copy with a small customisation sticker in a corner of each label, away from the barcode.
+- **Label Studio:** drop in the day's label PDF (one file with all labels) and see each page's detected Order ID, matched order and printed order date. Stamping also saves that order date to matching orders that don't have one. Fix unmatched pages by hand, then download the print-ready PDF: a green CUSTOMISATION box (name, charm, notes) **right below each label with a small gap**. On A4 label + invoice pages (Meesho, Flipkart) the invoice part is moved down to make room, so nothing is covered. Small 4x6 labels (Flipkart) are laid out **4 per A4 sheet** with the box under each and light cut guides: print at actual size (100%), not "4 per sheet". Other layouts get the box under the label's content, or in the chosen corner as a last resort. Order IDs: Meesho sub-order and Flipkart OD numbers first, then the number after "Order No." (other channels); SKU codes and courier AWB numbers are ignored.
 - **WhatsApp Bot:** each number has a bot mode. **Read only** quietly reads every chat and saves the order ID, name, charm and notes it finds, never messaging customers (use this when staff also chat on the number). **Ask questions** has the bot ask the customer step by step. **Off** just stores messages for Chats. Supports several numbers, connected directly through Meta or through 360dialog.
 - **Dashboard:** order counts (total, today, from WhatsApp, by source), recent orders and shortcuts.
 - **Settings:** your account (name, email, password), WhatsApp numbers (add, check, pause, delete; tokens stored encrypted), message templates (what fills each blank, which template "Send confirmation" and late replies use), shop name, the bot's message wording, Label Studio defaults, and security (session length, log out other devices, recent activity, system status).
@@ -169,7 +169,8 @@ Reply to this message if you have any questions. Thank you for shopping with Cel
 | PATCH/DELETE | `/api/orders/{id}` | update / delete one |
 | DELETE | `/api/orders` | delete all |
 | POST | `/api/orders/bulk` | bulk insert |
-| GET | `/api/orders/export.csv` | CSV export |
+| GET | `/api/orders` filters | `q`, `phone`, `order_id`, `start`/`end` (ISO times) and `tz` (minutes); all optional and combined |
+| GET | `/api/orders/export.csv` | CSV export (same filters; includes `order_date`) |
 | GET | `/api/stats` | dashboard numbers |
 | POST | `/api/extract` | AI extract from pasted text |
 | POST | `/api/extract/bulk-file` | AI extract from exported chat `.txt` (chunked, deduped) |
@@ -187,7 +188,7 @@ Reply to this message if you have any questions. Thank you for shopping with Cel
 | GET | `/api/inbox/templates?number=` | the number's templates (`refresh=true` reloads from WhatsApp) and the remembered settings |
 | POST | `/api/inbox/send-template` | send an approved template (any time); `order_id` marks that order confirmed |
 | PUT | `/api/settings/templates` | which template "Send confirmation" and late replies use, and which field fills each blank |
-| GET | `/api/orders/sheet.pdf` | order sheet PDF (`start`, `end` ISO times, `tz` minutes, `title`; up to 93 days) |
+| GET | `/api/orders/sheet.pdf` | order sheet PDF grouped by order date (`start`/`end` up to 93 days, and/or `phone`, `order_id`; `tz`, `title`) |
 | GET | `/api/wa/status`, `/api/wa/numbers`, `/api/wa/conversations` | bot status |
 | POST | `/api/wa/test-send` | send a test message |
 | GET | `/api/health` | health check (used by Render) |
@@ -236,6 +237,10 @@ cd backend
 cd backend
 .venv/Scripts/python.exe tests/test_media.py
 ```
+
+`backend/tests/test_labels.py` checks label reading and the print layout with made-up labels shaped like the real Meesho, Flipkart and courier ones (no database needed): order IDs vs SKU/AWB numbers, order dates, the box below each label on A4 pages, 4-per-sheet small labels and the fallbacks.
+
+`backend/tests/test_order_filters.py` covers the date, phone and order ID filters, order dates (formats, chat, label PDFs, never overwritten), the grouped order sheet, filtered CSV export and the bot keeping the customer's phone.
 
 `backend/tests/test_reads.py` stops and restarts the app while a chat read is waiting and checks it still happens (exactly once), that a burst of messages is read once, and that a failed read is retried.
 

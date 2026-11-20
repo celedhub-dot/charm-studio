@@ -249,7 +249,8 @@ export default function LabelStudio() {
       downloadBlob(res.data, name);
       const matched = res.headers["x-matched-pages"] ?? "?";
       const nf = res.headers["x-not-found-pages"] ?? "?";
-      toast.success(`PDF ready: ${matched} matched, ${nf} not found`);
+      const dates = Number(res.headers["x-order-dates-saved"] || 0);
+      toast.success(`PDF ready: ${matched} matched, ${nf} not found${dates ? `. Saved the order date for ${dates} order${dates === 1 ? "" : "s"} from the labels` : ""}`);
     } catch (e) {
       let msg = errorMessage(e);
       if (e?.response?.data instanceof Blob) {
@@ -275,7 +276,7 @@ export default function LabelStudio() {
     <div>
       <PageHeader
         title="Label Studio"
-        subtitle="Upload your A4 shipping-label PDF. We find each Order ID and stamp the customisation in a small corner sticker, clear of the barcode."
+        subtitle="Upload the day's label PDF from Meesho or Flipkart. We find each Order ID and put the customisation box right below each label. Small 4x6 labels come out 4 per A4 sheet: print at actual size (100%)."
         actions={
           analysis && (
             <Button variant="outline" onClick={reset} data-testid="label-reset-btn">
@@ -329,7 +330,9 @@ export default function LabelStudio() {
             <CardContent className="grid gap-5 p-5 lg:grid-cols-[1fr_auto] lg:items-end">
               <div className="grid gap-4 sm:grid-cols-3">
                 <div className="space-y-1.5">
-                  <Label>Sticker corner</Label>
+                  <Label title="Meesho, Flipkart and most labels get the box right below the label. The corner is used only for layouts Charm.Studio doesn't recognise.">
+                    Corner (unusual labels only)
+                  </Label>
                   <div className="flex items-center gap-3">
                     <StickerPreview position={position} />
                     <SimpleSelect value={position} onValueChange={setPosition} options={POSITIONS} testId="sticker-position-select" />

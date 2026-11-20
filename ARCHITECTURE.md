@@ -106,6 +106,7 @@ notes         text                       started_at         timestamptz
 source        text  manual|ai|csv|whatsapp  updated_at      timestamptz
 channel       text  (WA number name)
 customer_phone text (digits only; links to Chats)
+order_date    date (Meesho/Flipkart order date from chat or label; NULL = unknown)
 confirmed_at  timestamptz (last confirmation template sent)
 created_at    timestamptz
 ```
@@ -232,12 +233,13 @@ creates a new order pre-filled with the detected ID.
 
 Generate ──POST /api/pdf/annotate (file, position, skip_unmatched, font_size, overrides)──>
    for each page:  override ?? first match
-     matched   -> green "CUSTOMISATION" sticker: Name / Charm / Notes
-     unmatched -> red "ORDER NOT FOUND" sticker with the detected ID (unless skip_unmatched)
-   <── application/pdf + X-Matched-Pages + X-Not-Found-Pages
+     matched   -> green "CUSTOMISATION" box: Name / Charm / Notes; label's printed order date saved if missing
+     unmatched -> red "ORDER NOT FOUND" box with the detected ID (unless skip_unmatched)
+   build_label_pdf lays the pages out for printing (see Layout below)
+   <── application/pdf + X-Matched-Pages + X-Not-Found-Pages + X-Order-Dates-Saved
 ```
 
-**ID detection** applies these regexes to each page's text, in order, and drops hits that are just part of an ID already found:
+**ID detection** (`detect_ids`) uses the Meesho and Flipkart patterns first; only if neither matches does it take the number after "Order No." / "Order Id" (10+ digits, for other channels), and only then any long number. A shorter hit inside a longer one is dropped (the `_1` form replaces the bare purchase-order number), and hits 6+ digits shorter than the longest one on the page are dropped too (SKU codes like `1671380291_8` under the "Order No." heading, courier AWB numbers). Checked on 438 real label pages: every page's first ID was the right one.
 
 | Pattern | Marketplace | Example |
 |---|---|---|
@@ -247,7 +249,12 @@ Generate ──POST /api/pdf/annotate (file, position, skip_unmatched, font_size
 
 **Matching** (`ids_match`): both IDs are normalized (non-alphanumerics removed, uppercased). They match if they are equal, or if the shorter one is at least 8 characters long and any 8-character run of it appears in the longer one. All orders are loaded once per request and matched in memory.
 
-**Stickers** (`draw_sticker`) are 180 pt wide and sit 14 pt from the chosen corner. They have a white box with a thin border, a filled header strip and Helvetica text. Each line is cut to 30 characters and then to the box width with `...`; base-14 Helvetica can't draw the `…` character. The sticker is deliberately small and in a corner so it never covers the barcode.
+**Layout** (`build_label_pdf`), per page:
+- **A4 label + invoice pages** (Meesho: up to the "Product Details" row; Flipkart: up to "Printed at / Not for resale"): `label_bottom` finds where the label ends (the border line under it). A new page shows the label, then the box `BOX_GAP` (8 pt) below it, then the rest of the original page moved down (`show_pdf_page` with clips; shrunk only if it wouldn't fit).
+- **Small labels** (narrower than 400 pt, e.g. Flipkart 4x6 at 221x360): four per A4 sheet in a 2x2 grid at full size, each with its box 8 pt below, plus light dashed cut guides. Labels too big for a quarter sheet stay on their own page with the box right under their content (`page_content_boxes`), and the page is made taller only if there's no room.
+- **Anything else**: `draw_sticker` looks for empty space nearest the chosen corner using a map of text, images and barcodes (thin filled bars grouped in crowds are barcodes; lone thin bars are table rules), and only as a last resort uses the corner itself.
+
+Boxes are white with a thin border, a filled header strip and Helvetica text; lines are cut to fit with `...` (base-14 Helvetica can't draw `…`).
 
 ### 4. WhatsApp bot
 

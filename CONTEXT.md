@@ -104,6 +104,7 @@ These came from the original spec. Keep them unless there's a good reason to cha
 - No real AI call has been made yet: no `ANTHROPIC_API_KEY` or Ollama key is configured.
 - The WhatsApp bot hasn't been tested against a real Meta or 360dialog number yet (none added).
 - The main number 83390 39324 had a temporary WhatsApp restriction (several staff on WhatsApp Web). Plan: once it lifts, connect it to 360dialog with coexistence and add it in Settings as a 360dialog number in Read-only mode, so staff chat in Charm.Studio instead of WhatsApp Web.
+- Label Studio was checked against 8 real label PDFs (438 pages: Meesho label-only and label+invoice, Flipkart 4x6 and label+invoice, a courier label): correct order ID on every page, order dates read from Meesho and Flipkart invoices, the box placed right below each label, Flipkart 4x6 labels 4 per A4 sheet. The real labels stay on the seller's PC; `tests/test_labels.py` uses made-up labels with the same layouts.
 - Photos, voice notes and files in Chats pass 23 automated checks (`tests/test_media.py`) and were clicked through against a local fake 360dialog (photo with caption shown, PDF card, staff photo sent with caption).
 - The read-only bot's waiting reads are stored in the database and survive restarts and deploys (`tests/test_reads.py`, 6 checks).
 - Late replies (typed replies after 24 hours sent as an order-update template) pass the automated checks in `tests/test_templates.py` (52 total). The reply-box and dialog changes compile but weren't clicked through in a browser.

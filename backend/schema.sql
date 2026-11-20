@@ -99,6 +99,9 @@ ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS webhook_key text NOT NULL DEFAUL
 ALTER TABLE wa_numbers ADD COLUMN IF NOT EXISTS waba_id     text NOT NULL DEFAULT '';  -- Meta: needed to list templates
 -- When an order confirmation template was last sent for this order
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_at timestamptz;
+-- The Meesho/Flipkart order date, read from the customer's chat or the shipping label (NULL = unknown)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_date date;
+CREATE INDEX IF NOT EXISTS orders_order_date_idx ON orders (order_date);
 
 -- Every WhatsApp message in and out (customer, bot, staff, or sent from the phone app).
 CREATE TABLE IF NOT EXISTS wa_messages (

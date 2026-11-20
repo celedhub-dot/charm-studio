@@ -60,29 +60,70 @@ const fromInput = (v) => {
 };
 const niceDay = (d) => d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
 
-function OrderSheetDialog({ open, onClose }) {
+const EMPTY_FILTERS = { date: "any", from: "", to: "", phone: "", orderId: "" };
+const DATE_MODES = [
+  ["any", "Any date"],
+  ["today", "Today"],
+  ["yesterday", "Yesterday"],
+  ["custom", "Pick dates"],
+];
+
+/** {start, end, title} for a date filter; null for "any"; {error} when the picked dates are incomplete. */
+function dateRange(mode, from, to) {
   const today = dayStart(new Date());
-  const [mode, setMode] = useState("today");
-  const [from, setFrom] = useState(toInput(today));
-  const [to, setTo] = useState(toInput(today));
+  let first;
+  let last;
+  if (mode === "any") return null;
+  if (mode === "today") first = last = today;
+  else if (mode === "yesterday") first = last = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  else {
+    if (!from) return { error: "Pick a date" };
+    first = fromInput(from);
+    last = to ? fromInput(to) : first; // one date = that whole day
+    if (last < first) return { error: "The end date is before the start date" };
+  }
+  const end = new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1);
+  const title = first.getTime() === last.getTime() ? niceDay(first) : `${niceDay(first)} to ${niceDay(last)}`;
+  return { start: first, end, title };
+}
+
+function DateModeButtons({ value, onChange, testPrefix, allowAny = true }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {DATE_MODES.filter(([v]) => allowAny || v !== "any").map(([v, l]) => (
+        <button
+          key={v}
+          type="button"
+          data-testid={`${testPrefix}-${v}`}
+          onClick={() => onChange(v)}
+          className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
+            value === v ? "border-forest bg-forest-50 text-forest" : "border-line text-muted hover:border-forest/40"
+          }`}
+        >
+          {l}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function OrderSheetDialog({ open, onClose, initial }) {
+  const today = dayStart(new Date());
+  const [f, setF] = useState(EMPTY_FILTERS);
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (open) setF({ ...EMPTY_FILTERS, date: "today", ...(initial || {}) });
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (k) => (e) => setF({ ...f, [k]: typeof e === "string" ? e : e.target.value });
 
   const download = async () => {
-    let start;
-    let endDay;
-    if (mode === "today") start = endDay = today;
-    else if (mode === "yesterday") start = endDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-    else {
-      if (!from || !to) return toast.error("Pick both dates");
-      start = fromInput(from);
-      endDay = fromInput(to);
-      if (endDay < start) return toast.error("The end date is before the start date");
-    }
-    const end = new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate() + 1);
-    const title = start.getTime() === endDay.getTime() ? niceDay(start) : `${niceDay(start)} to ${niceDay(endDay)}`;
+    const range = dateRange(f.date, f.from, f.to);
+    if (range?.error) return toast.error(range.error);
+    if (!range && !f.phone.trim() && !f.orderId.trim()) return toast.error("Choose a date, a phone number or an order ID");
+    const bits = [range?.title, f.phone.trim() && `phone ${f.phone.trim()}`, f.orderId.trim() && `order ${f.orderId.trim()}`].filter(Boolean);
     setBusy(true);
     try {
-      await downloadOrderSheet(start, end, title);
+      await downloadOrderSheet(range?.start || null, range?.end || null, bits.join(" · "), { phone: f.phone, order_id: f.orderId });
       onClose();
     } catch (e) {
       let msg = errorMessage(e);
@@ -104,40 +145,38 @@ function OrderSheetDialog({ open, onClose }) {
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Order sheet PDF</DialogTitle>
-          <DialogDescription>A printable table of every order received in the period: time, order ID, name, charm, notes and phone.</DialogDescription>
+          <DialogDescription>
+            A printable table of the matching orders: date and time, order ID, name, charm, notes and phone. Filter by date, phone number,
+            order ID, or any mix.
+          </DialogDescription>
         </DialogHeader>
-        <div className="grid grid-cols-3 gap-2">
-          {[
-            ["today", "Today"],
-            ["yesterday", "Yesterday"],
-            ["custom", "Pick dates"],
-          ].map(([v, l]) => (
-            <button
-              key={v}
-              type="button"
-              data-testid={`sheet-mode-${v}`}
-              onClick={() => setMode(v)}
-              className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
-                mode === v ? "border-forest bg-forest-50 text-forest" : "border-line text-muted hover:border-forest/40"
-              }`}
-            >
-              {l}
-            </button>
-          ))}
+        <div className="space-y-1.5">
+          <Label>Date</Label>
+          <DateModeButtons value={f.date} onChange={set("date")} testPrefix="sheet-mode" />
         </div>
-        {mode === "custom" && (
+        {f.date === "custom" && (
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label htmlFor="sheet-from">From</Label>
-              <Input id="sheet-from" type="date" data-testid="sheet-from-input" value={from} max={toInput(today)} onChange={(e) => setFrom(e.target.value)} />
+              <Input id="sheet-from" type="date" data-testid="sheet-from-input" value={f.from} max={toInput(today)} onChange={set("from")} />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="sheet-to">To</Label>
-              <Input id="sheet-to" type="date" data-testid="sheet-to-input" value={to} max={toInput(today)} onChange={(e) => setTo(e.target.value)} />
+              <Label htmlFor="sheet-to">To (optional)</Label>
+              <Input id="sheet-to" type="date" data-testid="sheet-to-input" value={f.to} max={toInput(today)} onChange={set("to")} />
             </div>
-            <p className="col-span-2 text-xs text-muted">Up to 3 months at a time.</p>
+            <p className="col-span-2 text-xs text-muted">One date for a single day, or a range of up to 3 months.</p>
           </div>
         )}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="sheet-phone">Phone (optional)</Label>
+            <Input id="sheet-phone" data-testid="sheet-phone-input" inputMode="numeric" placeholder="e.g. 98765 43210" value={f.phone} onChange={set("phone")} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="sheet-order">Order ID (optional)</Label>
+            <Input id="sheet-order" data-testid="sheet-order-input" placeholder="e.g. 123456789012_1" value={f.orderId} onChange={set("orderId")} />
+          </div>
+        </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} data-testid="sheet-cancel-btn">
             Cancel
@@ -155,6 +194,10 @@ export default function Orders() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const setFilter = (k) => (e) => setFilters((cur) => ({ ...cur, [k]: typeof e === "string" ? e : e.target.value }));
+  const range = dateRange(filters.date, filters.from, filters.to);
+  const filtered = !!(query.trim() || filters.phone.trim() || filters.orderId.trim() || range);
   const [form, setForm] = useState(emptyOrder());
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -169,7 +212,7 @@ export default function Orders() {
   const exportCsv = async () => {
     setExporting(true);
     try {
-      await exportOrdersCsv();
+      await exportOrdersCsv(filtered && !range?.error ? { q: query, phone: filters.phone, order_id: filters.orderId, start: range?.start, end: range?.end } : undefined);
     } catch (err) {
       toast.error(errorMessage(err, "Could not export CSV"));
     } finally {
@@ -177,10 +220,10 @@ export default function Orders() {
     }
   };
 
-  const load = useCallback(async (q) => {
+  const load = useCallback(async (f) => {
     setLoading(true);
     try {
-      setOrders(await getOrders(q));
+      setOrders(await getOrders(f));
     } catch (e) {
       toast.error(errorMessage(e, "Could not load orders"));
     } finally {
@@ -189,9 +232,14 @@ export default function Orders() {
   }, []);
 
   useEffect(() => {
-    const t = setTimeout(() => load(query), 250);
+    if (range?.error) return undefined; // waiting for a date to be picked
+    const t = setTimeout(
+      () => load({ q: query, phone: filters.phone, order_id: filters.orderId, start: range?.start, end: range?.end }),
+      300
+    );
     return () => clearTimeout(t);
-  }, [query, load]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, filters, load]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -343,7 +391,7 @@ export default function Orders() {
       <Card>
         <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
           <CardTitle>
-            All orders <span className="ml-1 text-sm font-medium text-muted">({orders.length})</span>
+            {filtered ? "Matching orders" : "All orders"} <span className="ml-1 text-sm font-medium text-muted">({orders.length})</span>
           </CardTitle>
           <div className="relative w-full sm:w-72">
             <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
@@ -356,6 +404,48 @@ export default function Orders() {
             />
           </div>
         </CardHeader>
+        <div className="grid gap-3 border-b border-line px-5 pb-4" data-testid="orders-filters">
+          <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
+            <div className="space-y-1.5">
+              <Label>Date</Label>
+              <DateModeButtons value={filters.date} onChange={setFilter("date")} testPrefix="filter-date" />
+            </div>
+            {filters.date === "custom" && (
+              <div className="flex items-end gap-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="filter-from">From</Label>
+                  <Input id="filter-from" type="date" className="h-9" data-testid="filter-from-input" value={filters.from} onChange={setFilter("from")} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="filter-to">To (optional)</Label>
+                  <Input id="filter-to" type="date" className="h-9" data-testid="filter-to-input" value={filters.to} onChange={setFilter("to")} />
+                </div>
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <Label htmlFor="filter-phone">Phone</Label>
+              <Input id="filter-phone" className="h-9 w-44" inputMode="numeric" placeholder="e.g. 98765 43210" data-testid="filter-phone-input" value={filters.phone} onChange={setFilter("phone")} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="filter-order">Order ID</Label>
+              <Input id="filter-order" className="h-9 w-48" placeholder="e.g. 123456789012_1" data-testid="filter-order-input" value={filters.orderId} onChange={setFilter("orderId")} />
+            </div>
+            {filtered && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setFilters(EMPTY_FILTERS);
+                  setQuery("");
+                }}
+                data-testid="filters-clear-btn"
+              >
+                Clear filters
+              </Button>
+            )}
+          </div>
+          {range?.error && <p className="text-xs text-muted">{range.error} to filter by date.</p>}
+        </div>
         <CardContent className="px-0 pb-2">
           {loading && orders.length === 0 ? (
             <div className="flex justify-center py-10 text-muted">
@@ -363,7 +453,11 @@ export default function Orders() {
             </div>
           ) : orders.length === 0 ? (
             <div className="px-5 pb-3">
-              <EmptyState icon={Package} title={query ? "No matches" : "No orders yet"} text={query ? "Try a different search." : "Use the form above to add your first order."} />
+              <EmptyState
+                icon={Package}
+                title={filtered ? "No matches" : "No orders yet"}
+                text={filtered ? "Try a different date, phone number or order ID." : "Use the form above to add your first order."}
+              />
             </div>
           ) : (
             <Table>
@@ -375,7 +469,7 @@ export default function Orders() {
                   <TH>Notes</TH>
                   <TH>Phone</TH>
                   <TH>Source</TH>
-                  <TH>Created</TH>
+                  <TH>Order date</TH>
                   <TH className="pr-5 text-right">Actions</TH>
                 </tr>
               </THead>
@@ -397,7 +491,13 @@ export default function Orders() {
                       <TD>
                         <SourceBadge source={o.source} />
                       </TD>
-                      <TD className="whitespace-nowrap text-xs text-muted">{formatDate(o.created_at)}</TD>
+                      <TD className="whitespace-nowrap text-xs" title={`Saved in Charm.Studio ${formatDate(o.created_at)}`} data-testid={`order-date-${o.id}`}>
+                        {o.order_date ? (
+                          <span className="text-ink">{niceDay(fromInput(o.order_date))}</span>
+                        ) : (
+                          <span className="text-muted" title="Not found in the chat or on a label yet">—</span>
+                        )}
+                      </TD>
                       <TD className="pr-5">
                         <div className="flex justify-end gap-1">
                           <Button size="icon" variant="ghost" onClick={saveEdit} data-testid="edit-save-btn" aria-label="Save">
@@ -445,7 +545,13 @@ export default function Orders() {
                       <TD>
                         <SourceBadge source={o.source} />
                       </TD>
-                      <TD className="whitespace-nowrap text-xs text-muted">{formatDate(o.created_at)}</TD>
+                      <TD className="whitespace-nowrap text-xs" title={`Saved in Charm.Studio ${formatDate(o.created_at)}`} data-testid={`order-date-${o.id}`}>
+                        {o.order_date ? (
+                          <span className="text-ink">{niceDay(fromInput(o.order_date))}</span>
+                        ) : (
+                          <span className="text-muted" title="Not found in the chat or on a label yet">—</span>
+                        )}
+                      </TD>
                       <TD className="pr-5">
                         <div className="flex justify-end gap-1">
                           {o.customer_phone && (
@@ -486,7 +592,11 @@ export default function Orders() {
         </CardContent>
       </Card>
 
-      <OrderSheetDialog open={sheetOpen} onClose={() => setSheetOpen(false)} />
+      <OrderSheetDialog
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        initial={filtered && !range?.error ? { ...filters } : null}
+      />
 
       <TemplateDialog
         open={!!confirmFor}
