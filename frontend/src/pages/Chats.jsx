@@ -22,6 +22,7 @@ import {
   SealCheck,
   Paperclip,
   X,
+  Trash,
 } from "@phosphor-icons/react";
 import {
   getConversations,
@@ -29,13 +30,14 @@ import {
   sendInboxMessage,
   sendInboxMedia,
   readOrdersAgain,
+  deleteChat,
   updateOrder,
   createOrder,
   waNumbers,
   errorMessage,
 } from "../lib/api";
 import { Input, Label, Textarea, Badge, Spinner } from "../components/ui/primitives";
-import { SimpleSelect } from "../components/ui/overlays";
+import { SimpleSelect, ConfirmDialog } from "../components/ui/overlays";
 import { Button } from "../components/ui/button";
 import { EmptyState, SourceBadge } from "../components/common";
 import { cn, timeAgo } from "../lib/utils";
@@ -363,7 +365,7 @@ function OrdersPanel({ thread, onChanged, onConfirm }) {
 }
 
 /* ---------- Thread ---------- */
-function Thread({ sel, onBack, onSent }) {
+function Thread({ sel, onBack, onSent, onDeleted }) {
   const [thread, setThread] = useState(null);
   const [text, setText] = useState("");
   const [file, setFile] = useState(null); // attachment waiting to be sent
@@ -418,6 +420,16 @@ function Thread({ sel, onBack, onSent }) {
     setFile(f);
   };
 
+  const removeChat = async () => {
+    try {
+      const r = await deleteChat(contact.number_label, contact.customer_phone);
+      toast.success(`Chat deleted (${r.messages} message${r.messages === 1 ? "" : "s"}). Orders were kept.`);
+      onDeleted();
+    } catch (err) {
+      toast.error(errorMessage(err, "Couldn't delete this chat"));
+    }
+  };
+
   const send = async (e) => {
     e?.preventDefault();
     const body = text.trim();
@@ -466,6 +478,25 @@ function Thread({ sel, onBack, onSent }) {
           <Button size="sm" variant="outline" className="xl:hidden" onClick={() => setShowOrders((v) => !v)} data-testid="toggle-orders-btn">
             <Package size={14} /> {thread.orders.length}
           </Button>
+          <ConfirmDialog
+            testId="delete-chat"
+            title="Delete this chat permanently?"
+            description={`All ${messages.length} message${messages.length === 1 ? "" : "s"}, photos and files with ${
+              contact.name || fmtPhone(contact.customer_phone)
+            } will be removed from Charm.Studio and the database for everyone on the team. Deleted chats cannot be recovered. Saved orders are kept, and the customer's own WhatsApp is not affected. If they message again, a new chat starts.`}
+            confirmLabel="Delete forever"
+            onConfirm={removeChat}
+            trigger={
+              <button
+                className="rounded-lg p-1.5 text-muted hover:bg-red-50 hover:text-red-600"
+                aria-label="Delete chat"
+                title="Delete chat"
+                data-testid="delete-chat-btn"
+              >
+                <Trash size={18} />
+              </button>
+            }
+          />
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto bg-[#EFEAE1]">
@@ -672,7 +703,10 @@ export default function Chats() {
         </div>
         <div className={cn("min-w-0 flex-1", sel ? "block" : "hidden lg:block")}>
           {sel ? (
-            <Thread key={`${sel.label}|${sel.phone}`} sel={sel} onBack={() => select(null)} onSent={load} />
+            <Thread key={`${sel.label}|${sel.phone}`} sel={sel} onBack={() => select(null)} onSent={load} onDeleted={() => {
+                select(null);
+                load();
+              }} />
           ) : (
             <div className="grid h-full place-items-center p-6">
               <EmptyState

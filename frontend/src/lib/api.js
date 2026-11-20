@@ -136,6 +136,7 @@ const threadPath = (label, phone) => `/inbox/conversations/${encodeURIComponent(
 export const getConversations = (q, number) =>
   api.get("/inbox/conversations", { params: { q: q || undefined, number: number || undefined } }).then((r) => r.data);
 export const getThread = (label, phone) => api.get(threadPath(label, phone)).then((r) => r.data);
+export const deleteChat = (label, phone) => api.delete(threadPath(label, phone)).then((r) => r.data);
 export const readOrdersAgain = (label, phone) => api.post(`${threadPath(label, phone)}/read-orders`).then((r) => r.data);
 export const sendInboxMessage = (numberLabel, to, text) =>
   api.post("/inbox/send", { number_label: numberLabel, to, text }).then((r) => r.data);

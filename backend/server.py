@@ -1997,6 +1997,23 @@ async def wa_post(cfg: Dict[str, Any], path: str, payload: Dict[str, Any]) -> ht
         return await client.post(url, json=payload, headers=headers)
 
 
+TOKEN_HELP = (
+    " - the access token saved in Settings > WhatsApp numbers isn't allowed to send from this number. "
+    "Make a new token for a system user with Full control of the WhatsApp account that holds this number, "
+    "with the whatsapp_business_messaging and whatsapp_business_management permissions, then paste it there."
+)
+
+
+def is_token_error(err: Dict[str, Any]) -> bool:
+    """Meta's codes for a bad, expired or under-permitted token (not for a problem with the message itself)."""
+    try:
+        code = int(err.get("code"))
+    except (TypeError, ValueError):
+        code = None
+    text = str(err.get("message") or "").lower()
+    return code in (0, 3, 10, 190) or (code is not None and 200 <= code < 300) or "authoriz" in text or "permission" in text
+
+
 def _api_error(resp: httpx.Response) -> str:
     try:
         data = resp.json()
@@ -2005,7 +2022,10 @@ def _api_error(resp: httpx.Response) -> str:
     if isinstance(data, dict):
         err = data.get("error") or (data.get("errors") or [{}])[0]
         if isinstance(err, dict):
-            return str(err.get("message") or err.get("title") or err.get("details") or f"HTTP {resp.status_code}")
+            msg = str(err.get("message") or err.get("title") or err.get("details") or f"HTTP {resp.status_code}")
+            if "error" in data and is_token_error(err):  # Meta's format (360dialog uses "errors")
+                msg += TOKEN_HELP
+            return msg
     return f"HTTP {resp.status_code}"
 
 
@@ -2162,18 +2182,27 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     fields: Dict[str, str] = dict(conv["fields"] or {}) if conv else {}
     step = next_step(fields)
 
+    ids = detect_ids(cleaned)  # order IDs by pattern: works with or without an AI key
     if len(cleaned.split()) >= 6:
-        extracted = await ai_extract_message(cleaned)
+        extracted = await ai_extract_message(cleaned) if ai_ready() else {}
         for k, v in extracted.items():
             if not fields.get(k):
                 fields[k] = v
-        if not extracted and not is_new:
-            fields[STEP_KEYS[step]] = cleaned
+        if ids and not fields.get("order_id"):
+            fields["order_id"] = ids[0]
+        if not extracted and not ids and not is_new and STEP_KEYS[step] != "order_id":
+            fields[STEP_KEYS[step]] = cleaned  # a long answer to the current question (never a whole sentence as an ID)
     elif is_new and not re.search(r"\d", cleaned):
         pass  # first contact with a short non-ID message: just greet below
     else:
         current = STEP_KEYS[step]
-        if current == "notes" and lowered in SKIP_WORDS:
+        if current == "order_id":
+            if ids:
+                fields["order_id"] = ids[0]
+            elif re.search(r"\d", cleaned):
+                fields["order_id"] = cleaned  # an ID in a format we don't know: take it as typed
+            # otherwise (e.g. "ok") the bot simply asks for the Order ID again
+        elif current == "notes" and lowered in SKIP_WORDS:
             fields["notes"] = ""
         else:
             fields[current] = cleaned
@@ -2625,6 +2654,25 @@ async def meta_check(phone_id: str, token: str) -> Dict[str, Any]:
     if resp.status_code >= 300:
         msg = (data.get("error") or {}).get("message") if isinstance(data, dict) else None
         raise HTTPException(META_CHECK_FAILED, f"Meta rejected these details: {msg or resp.status_code}")
+    # Reading the number only needs whatsapp_business_management; sending needs whatsapp_business_messaging too.
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            perms = await client.get(
+                f"https://graph.facebook.com/{WA_GRAPH_VERSION}/me/permissions",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        granted = (
+            {p.get("permission") for p in perms.json().get("data", []) if p.get("status") == "granted"}
+            if perms.status_code < 300 else None
+        )
+    except (httpx.HTTPError, ValueError, AttributeError):
+        granted = None  # couldn't tell: don't block saving
+    if granted and "whatsapp_business_messaging" not in granted:
+        raise HTTPException(
+            META_CHECK_FAILED,
+            "This token can read the number but can't send messages: it's missing the whatsapp_business_messaging "
+            "permission. Make a new token with whatsapp_business_messaging and whatsapp_business_management ticked.",
+        )
     return data if isinstance(data, dict) else {}
 
 
@@ -2894,6 +2942,29 @@ async def inbox_read_orders(label: str, phone: str):
     await _thread(label, phone)  # 404 if unknown
     result = await read_order_details(label, phone)
     return {**result, "ai_ready": ai_ready()}
+
+
+@api.delete("/inbox/conversations/{label}/{phone}")
+async def inbox_delete_chat(label: str, phone: str):
+    """Delete a chat for good: its messages, the Chats list row and any half-finished bot questions.
+    Orders saved from the chat are kept. The customer's own WhatsApp is not affected."""
+    async with db().acquire() as conn:
+        async with conn.transaction():
+            media = await conn.fetch(
+                "DELETE FROM wa_messages WHERE number_label = $1 AND customer_phone = $2 RETURNING media_id",
+                label, phone,
+            )
+            contact = await conn.execute(
+                "DELETE FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", label, phone
+            )
+            await conn.execute(
+                "DELETE FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2", label, phone
+            )
+    if contact.endswith(" 0") and not media:
+        raise HTTPException(404, "No chat with this customer on that number.")
+    for row in media:
+        MEDIA_CACHE.pop(row["media_id"], None)
+    return {"deleted": True, "messages": len(media)}
 
 
 async def reply_window_open(cfg: Dict[str, Any], to: str) -> bool:

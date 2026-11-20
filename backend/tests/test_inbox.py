@@ -45,6 +45,17 @@ async def drop_schema():
 
 asyncio.run(drop_schema())
 
+
+async def count_rows(phone):
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"], statement_cache_size=0)
+    try:
+        m = await conn.fetchval(f'SELECT count(*) FROM "{SCHEMA}".wa_messages WHERE customer_phone = $1', phone)
+        k = await conn.fetchval(f'SELECT count(*) FROM "{SCHEMA}".wa_contacts WHERE customer_phone = $1', phone)
+        return m, k
+    finally:
+        await conn.close()
+
+
 import pymupdf  # noqa: E402
 import server  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -204,6 +215,18 @@ try:
         bad = c.get("/api/orders/sheet.pdf", headers=H(tok), params={"start": "2026-01-01", "end": "2026-12-31"})
         check(bad.status_code == 400, "period over 3 months refused")
         check(c.get("/api/orders/sheet.pdf", params=params).status_code == 401, "sheet needs login")
+
+        print("Delete a chat")
+        before = len(c.get("/api/inbox/conversations", headers=H(tok)).json())
+        check(c.delete("/api/inbox/conversations/Main Shop/919876543210").status_code == 401, "delete needs login")
+        r = c.delete("/api/inbox/conversations/Main Shop/919876543210", headers=H(tok))
+        check(r.status_code == 200 and r.json()["messages"] >= 2, "chat deleted", r.text)
+        check(c.get("/api/inbox/conversations/Main Shop/919876543210", headers=H(tok)).status_code == 404, "chat is gone")
+        check(len(c.get("/api/inbox/conversations", headers=H(tok)).json()) == before - 1, "removed from the Chats list")
+        left = asyncio.run(count_rows("919876543210"))
+        check(left == (0, 0), "messages and contact removed from the database", left)
+        check(c.get("/api/orders?q=123456789012", headers=H(tok)).json(), "orders from the chat are kept")
+        check(c.delete("/api/inbox/conversations/Main Shop/919876543210", headers=H(tok)).status_code == 404, "deleting again: not found")
 
     print(f"\nALL {passed} CHECKS PASSED")
 finally:
