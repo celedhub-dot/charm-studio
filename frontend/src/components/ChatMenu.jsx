@@ -13,8 +13,10 @@ import {
   CheckCircle,
   Eraser,
   Trash,
+  Export,
 } from "@phosphor-icons/react";
 import { ConfirmDialog } from "./ui/overlays";
+import ExportChatDialog from "./ExportChatDialog";
 import { setChatState, clearChat, deleteChat, errorMessage } from "../lib/api";
 import { cn } from "../lib/utils";
 
@@ -24,7 +26,7 @@ const MENU_W = 216;
 /** The ⋮ menu on a chat in the list: archive, mute, pin, read/unread, clear, delete. */
 export default function ChatMenu({ chat, onChanged, onDeleted, onMarkedUnread }) {
   const [pos, setPos] = useState(null); // where the open menu sits (fixed, so the list's scroll never cuts it off)
-  const [confirm, setConfirm] = useState(null); // "clear" | "delete"
+  const [confirm, setConfirm] = useState(null); // "clear" | "delete" | "export"
   const btn = useRef(null);
   const menu = useRef(null);
   const who = chat.name || fmtPhone(chat.customer_phone);
@@ -111,6 +113,7 @@ export default function ChatMenu({ chat, onChanged, onDeleted, onMarkedUnread })
     chat.unread > 0
       ? { icon: CheckCircle, label: "Mark as read", run: () => change({ unread: false }) }
       : { icon: ChatCircleDots, label: "Mark as unread", run: () => change({ unread: true }) },
+    { icon: Export, label: "Export chat", run: () => ask("export") },
     { divider: true },
     { icon: Eraser, label: "Clear chat", run: () => ask("clear") },
     { icon: Trash, label: "Delete chat", danger: true, run: () => ask("delete") },
@@ -188,6 +191,13 @@ export default function ChatMenu({ chat, onChanged, onDeleted, onMarkedUnread })
         description={`All messages, photos and files with ${who} will be removed from Charm.Studio and the database for everyone on the team, and the chat disappears from your list. Deleted chats cannot be recovered. Saved orders are kept, and the customer's own WhatsApp is not affected. If they message again, a new chat starts.`}
         confirmLabel="Delete forever"
         onConfirm={doDelete}
+      />
+      <ExportChatDialog
+        open={confirm === "export"}
+        onOpenChange={(o) => !o && setConfirm(null)}
+        label={chat.number_label}
+        phone={chat.customer_phone}
+        who={who}
       />
     </span>
   );

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { toast } from "sonner";
 import {
   X,
@@ -15,10 +16,12 @@ import {
   CalendarBlank,
   ImageSquare,
   CaretRight,
+  Export,
 } from "@phosphor-icons/react";
 import { ConfirmDialog } from "./ui/overlays";
 import { Spinner } from "./ui/primitives";
 import { useMediaUrl } from "./MessageMedia";
+import ExportChatDialog from "./ExportChatDialog";
 import { cn, timeAgo } from "../lib/utils";
 
 export const fmtPhone = (p) => (p ? `+${p}` : "");
@@ -135,6 +138,7 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
     ? { read: "Reads chats and saves orders", ask: "Asks the customer questions", off: "Off" }[number.bot_mode] || "Off"
     : "This number isn't set up in Settings any more";
 
+  const [exporting, setExporting] = useState(false);
   const copy = (text, what) => {
     navigator.clipboard?.writeText(text);
     toast.success(`${what} copied`);
@@ -265,6 +269,16 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
             </div>
           )}
         </Section>
+
+        <button
+          type="button"
+          onClick={() => setExporting(true)}
+          className="flex w-full items-center gap-4 bg-white px-5 py-4 text-left text-[15px] text-ink hover:bg-cream"
+          data-testid="info-export-chat"
+        >
+          <Export size={20} className="text-muted" /> Export chat
+        </button>
+        <ExportChatDialog open={exporting} onOpenChange={setExporting} label={contact.number_label} phone={phone} who={name || fmtPhone(phone)} />
 
         <ConfirmDialog
           testId="delete-chat"

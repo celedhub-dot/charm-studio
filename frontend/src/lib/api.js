@@ -42,7 +42,15 @@ export function downloadBlob(blob, filename) {
 }
 
 export function filenameFromDisposition(header, fallback) {
-  const m = /filename="?([^"]+)"?/i.exec(header || "");
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header || ""); // names with non-English letters
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1]);
+    } catch {
+      /* fall back to the plain name */
+    }
+  }
+  const m = /filename="?([^";]+)"?/i.exec(header || "");
   return m ? m[1] : fallback;
 }
 
@@ -142,6 +150,14 @@ export const deleteChat = (label, phone) => api.delete(threadPath(label, phone))
 // { pinned, muted, archived, unread }: any of them, true/false
 export const setChatState = (label, phone, state) => api.patch(threadPath(label, phone), state).then((r) => r.data);
 export const clearChat = (label, phone) => api.post(`${threadPath(label, phone)}/clear`).then((r) => r.data);
+// WhatsApp-style export: .txt, or .zip with the photos/voice notes/files when media is true
+export const exportChat = async (label, phone, media) => {
+  const res = await api.get(`${threadPath(label, phone)}/export`, {
+    params: { media: media || undefined, tz: -new Date().getTimezoneOffset() },
+    responseType: "blob",
+  });
+  downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], media ? "WhatsApp Chat.zip" : "WhatsApp Chat.txt"));
+};
 export const readOrdersAgain = (label, phone) => api.post(`${threadPath(label, phone)}/read-orders`).then((r) => r.data);
 export const sendInboxMessage = (numberLabel, to, text) =>
   api.post("/inbox/send", { number_label: numberLabel, to, text }).then((r) => r.data);

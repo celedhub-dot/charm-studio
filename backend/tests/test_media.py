@@ -218,6 +218,28 @@ try:
         check(r.status_code == 409, "files follow the 24-hour rule too")
         check(c.post("/api/inbox/send-media", data={"number_label": "Shop", "to": "919876543210"}, files={"file": ("p.jpg", PHOTO, "image/jpeg")}).status_code == 401, "sending files needs login")
 
+        print("Export chat (like WhatsApp)")
+        import io as _io
+        import re as _re
+        import zipfile as _zip
+        exp = "/api/inbox/conversations/Shop/919876543210/export"
+        r = c.get(exp, headers=H(tok), params={"tz": 330})
+        txt = r.content.decode("utf-8")
+        lines = txt.splitlines()
+        check(r.status_code == 200 and "WhatsApp Chat with" in r.headers["content-disposition"] and ".txt" in r.headers["content-disposition"], "text export downloads as 'WhatsApp Chat with ….txt'")
+        check(all(_re.match(r"^\d{2}/\d{2}/\d{2}, \d{1,2}:\d{2} (am|pm) - .+?: ", ln) for ln in lines if _re.match(r"^\d{2}/", ln)), "Android layout: 21/11/26, 12:16 pm - Name: text", lines[:3])
+        check(txt.count("<Media omitted>") >= 3 and "print AARAV like this" in txt, "media omitted, captions kept")
+        check("Here is your preview" in txt and "Shop: " in txt, "shop's messages included under the shop name")
+        r = c.get(exp, headers=H(tok), params={"media": "true", "tz": 330})
+        z = _zip.ZipFile(_io.BytesIO(r.content))
+        names = z.namelist()
+        inner = z.read(next(n for n in names if n.endswith(".txt"))).decode("utf-8")
+        photo = next((n for n in names if _re.match(r"IMG-\d{8}-WA\d{4}\.jpg$", n)), None)
+        check(r.headers["content-type"] == "application/zip" and photo and z.read(photo) == PHOTO, "zip has the .txt and the photo as IMG-yyyymmdd-WA0001.jpg", names)
+        check(any(_re.match(r"PTT-\d{8}-WA\d{4}\.opus$", n) for n in names), "voice note saved as PTT-….opus", names)
+        check(f"{photo} (file attached)" in inner and "design.pdf" not in names and "<Media omitted>" in inner, "attached files named in the text; expired file stays omitted")
+        check(c.get(exp).status_code == 401 and c.get("/api/inbox/conversations/Shop/910000000000/export", headers=H(tok)).status_code == 404, "export needs login; unknown chat 404")
+
     print(f"\nALL {passed} CHECKS PASSED")
 finally:
     asyncio.run(drop_schema())

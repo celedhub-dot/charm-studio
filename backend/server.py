@@ -17,9 +17,11 @@ import re
 import secrets
 import time
 import uuid
+import zipfile
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -3782,6 +3784,101 @@ async def inbox_media(message_id: str):
         media_type=row["media_mime"] or mime,
         headers={"Cache-Control": "private, max-age=3600", "Content-Disposition": f'inline; filename="{name}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Export a chat like WhatsApp's "Export chat" (Android layout), with or without media
+# ---------------------------------------------------------------------------
+EXPORT_MEDIA_MAX = 100 * 1024 * 1024  # stop adding files to the zip after this much
+EXPORT_PREFIX = {"image": "IMG", "video": "VID", "audio": "AUD", "sticker": "STK"}
+EXPORT_EXT = {
+    "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/3gpp": "3gp",
+    "audio/ogg": "opus", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/aac": "aac", "audio/amr": "amr",
+    "application/pdf": "pdf", "text/plain": "txt",
+}
+
+
+def export_stamp(at: datetime, tz_minutes: int) -> str:
+    """'21/11/26, 12:16 pm' in the shop's time, as WhatsApp on Android writes it."""
+    t = at.astimezone(timezone(timedelta(minutes=tz_minutes)))
+    hour = t.hour % 12 or 12
+    return f"{t:%d/%m/%y}, {hour}:{t:%M} {'am' if t.hour < 12 else 'pm'}"
+
+
+def export_media_name(m: Dict[str, Any], n: int, at: datetime) -> str:
+    """WhatsApp-style file name: IMG-20261121-WA0001.jpg, PTT-... for voice notes, documents keep their name."""
+    mime = (m["media_mime"] or "").lower()
+    if m["kind"] == "document" and m["media_name"]:
+        return re.sub(r'[\\/:*?"<>|]+', "_", m["media_name"])[:120]
+    ext = EXPORT_EXT.get(mime) or (mime.split("/")[-1][:5] if "/" in mime else "bin")
+    prefix = "PTT" if m["kind"] == "audio" and "ogg" in mime else EXPORT_PREFIX.get(m["kind"], "DOC")
+    return f"{prefix}-{at:%Y%m%d}-WA{n:04d}.{ext}"
+
+
+@api.get("/inbox/conversations/{label}/{phone}/export")
+async def inbox_export_chat(label: str, phone: str, media: bool = False, tz: Optional[int] = None):
+    """The whole chat as WhatsApp's export .txt, or a .zip with the .txt and its photos/voice notes/files."""
+    contact = await db().fetchrow("SELECT name FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", label, phone)
+    if not contact:
+        raise HTTPException(404, "No chat with this customer on that number.")
+    tz_minutes = tz if tz is not None and -720 <= tz <= 840 else int(SHOP_UTC_OFFSET.total_seconds() // 60)
+    rows = await db().fetch(
+        "SELECT id, direction, kind, body, status, created_at, media_id, media_mime, media_name FROM wa_messages "
+        "WHERE number_label = $1 AND customer_phone = $2 AND status <> 'failed' ORDER BY created_at, id",
+        label, phone,
+    )
+    customer = contact["name"] or f"+{phone}"
+    shop = (SETTINGS.get("shop") or {}).get("shop_name") or label
+    cfg = next((c for c in WA_ALL if c["logical_id"] == label and c["token"]), None)
+
+    lines: List[str] = []
+    files: List[tuple] = []  # (name in zip, bytes)
+    total, counter = 0, 0
+    for m in rows:
+        who = customer if m["direction"] == "in" else shop
+        caption = m["body"] if m["body"] and m["body"] != m["media_name"] else ""
+        if m["media_id"]:
+            text = "<Media omitted>"
+            if media:
+                counter += 1
+                name = export_media_name(m, counter, m["created_at"])
+                try:
+                    cached = MEDIA_CACHE.get(m["media_id"])
+                    if cached:
+                        data = cached[0]
+                    elif cfg and total < EXPORT_MEDIA_MAX:
+                        data, _mime = await fetch_media(cfg, m["media_id"])
+                    else:
+                        data = None
+                    if data is not None and total + len(data) <= EXPORT_MEDIA_MAX:
+                        files.append((name, data))
+                        total += len(data)
+                        text = f"{name} (file attached)"
+                except HTTPException:
+                    pass  # WhatsApp no longer has it (kept ~30 days): stays "<Media omitted>"
+            if caption:
+                text += "\n" + caption
+        else:
+            text = m["body"] or f"[{m['kind']}]"
+        lines.append(f"{export_stamp(m['created_at'], tz_minutes)} - {who}: {text}")
+    transcript = ("\n".join(lines) + "\n") if lines else ""
+
+    title = f"WhatsApp Chat with {customer}"
+    safe = re.sub(r'[\\/:*?"<>|\r\n]+', "_", title)[:120]
+    ascii_name = re.sub(r"[^A-Za-z0-9 ._+()-]", "_", safe)
+
+    def disposition(ext: str) -> str:
+        return f"attachment; filename=\"{ascii_name}.{ext}\"; filename*=UTF-8''{quote(safe + '.' + ext)}"
+
+    if not media:
+        return Response(content=transcript.encode("utf-8"), media_type="text/plain; charset=utf-8",
+                        headers={"Content-Disposition": disposition("txt")})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"{safe}.txt", transcript)
+        for name, data in files:
+            z.writestr(name, data, compress_type=zipfile.ZIP_STORED)  # photos/audio are already compressed
+    return Response(content=buf.getvalue(), media_type="application/zip", headers={"Content-Disposition": disposition("zip")})
 
 
 @api.post("/inbox/send-media")
