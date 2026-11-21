@@ -45,7 +45,7 @@ import TemplateDialog from "../components/TemplateDialog";
 import MessageMedia, { fmtSize } from "../components/MessageMedia";
 import ContactInfo, { Avatar, fmtPhone } from "../components/ContactInfo";
 
-const ORDER_FIELDS = ["order_id", "product_name", "charm", "notes"];
+const ORDER_FIELDS = ["order_id", "product_name", "colour", "charm", "quantity", "notes"];
 const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const fmtDay = (iso) => new Date(iso).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
 const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -273,7 +273,9 @@ function OrderEditor({ order, onSaved, onConfirm }) {
       await updateOrder(order.id, {
         order_id: form.order_id,
         product_name: form.product_name,
+        colour: form.colour || "",
         charm: form.charm,
+        quantity: form.quantity || "",
         notes: form.notes,
       });
       toast.success("Order saved");
@@ -304,7 +306,9 @@ function OrderEditor({ order, onSaved, onConfirm }) {
       {[
         ["order_id", "Order ID", "font-mono"],
         ["product_name", "Name on product", ""],
+        ["colour", "Colour", ""],
         ["charm", "Charm", ""],
+        ["quantity", "Quantity", ""],
         ["notes", "Notes", ""],
       ].map(([k, l, cls]) => (
         <div key={k} className="space-y-1">

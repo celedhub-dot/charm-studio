@@ -61,7 +61,7 @@ export function StickerPreview({ position }) {
 
 function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onCreated }) {
   const [q, setQ] = useState("");
-  const [draft, setDraft] = useState({ order_id: page?.detected_ids?.[0] || "", product_name: "", charm: "", notes: "" });
+  const [draft, setDraft] = useState({ order_id: page?.detected_ids?.[0] || "", product_name: "", colour: "", charm: "", quantity: "", notes: "" });
   const [saving, setSaving] = useState(false);
 
   const filtered = useMemo(() => {
@@ -156,7 +156,9 @@ function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onC
               {[
                 ["order_id", "Order ID"],
                 ["product_name", "Name on product"],
+                ["colour", "Colour"],
                 ["charm", "Charm"],
+                ["quantity", "Quantity"],
                 ["notes", "Notes"],
               ].map(([k, l]) => (
                 <div key={k} className="space-y-1.5">
@@ -413,7 +415,10 @@ export default function LabelStudio() {
                       {order ? (
                         <div className="rounded-xl border border-forest/15 bg-forest-50/60 p-3 text-sm">
                           <div className="truncate"><span className="text-muted">Name:</span> {order.product_name || "—"}</div>
-                          <div className="truncate"><span className="text-muted">Charm:</span> {order.charm || "—"}</div>
+                          <div className="truncate"><span className="text-muted">Charm:</span> {order.charm || "—"}
+                            {order.colour && <span className="text-muted"> · {order.colour}</span>}
+                            {order.quantity && order.quantity !== "1" && <span className="text-muted"> · Qty {order.quantity}</span>}
+                          </div>
                           <div className="truncate"><span className="text-muted">Notes:</span> {order.notes || "—"}</div>
                           {p.matches.length > 1 && !overrides[p.page] && (
                             <div className="mt-1 text-xs text-terracotta-700">{p.matches.length} possible matches · first is used</div>

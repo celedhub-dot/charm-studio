@@ -27,6 +27,7 @@ os.environ.update(
         "DB_SCHEMA": SCHEMA,
         "AUTH_SECRET": secrets.token_urlsafe(48),
         "ADMIN_PASSWORD": "legacy-pass-123",
+        "BOT_REPLY_WAIT_SECONDS": "0",
         "RESET_PASSWORD": "",
         "RESEND_API_KEY": "re_test_fake",
         "FRONTEND_URL": "http://localhost:3000",

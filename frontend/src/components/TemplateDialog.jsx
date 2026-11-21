@@ -13,7 +13,9 @@ const FIELDS = [
   { value: "customer_name", label: "Customer name" },
   { value: "order_id", label: "Order ID" },
   { value: "product_name", label: "Name on product" },
+  { value: "colour", label: "Colour" },
   { value: "charm", label: "Charm" },
+  { value: "quantity", label: "Quantity" },
   { value: "notes", label: "Notes" },
   { value: "shop_name", label: "Shop name" },
   { value: "phone", label: "Customer phone" },
@@ -31,6 +33,8 @@ function guessField(name) {
   if (/message|update|text|detail/.test(n)) return "message";
   if (/order/.test(n)) return "order_id";
   if (/charm/.test(n)) return "charm";
+  if (/colou?r/.test(n)) return "colour";
+  if (/qty|quantity/.test(n)) return "quantity";
   if (/print|product|engrav/.test(n)) return "product_name";
   if (/note/.test(n)) return "notes";
   if (/shop|store|brand|business/.test(n)) return "shop_name";
@@ -163,7 +167,9 @@ export default function TemplateDialog({
     customer_name: contactName,
     order_id: currentOrder?.order_id || "",
     product_name: currentOrder?.product_name || "",
+    colour: currentOrder?.colour || "",
     charm: currentOrder?.charm || "",
+    quantity: currentOrder?.quantity || "",
     notes: currentOrder?.notes || "",
     shop_name: appSettings?.shop?.shop_name || "",
     phone: phone ? `+${phone}` : "",

@@ -21,4 +21,4 @@ export function timeAgo(iso) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-export const emptyOrder = () => ({ order_id: "", product_name: "", charm: "", notes: "" });
+export const emptyOrder = () => ({ order_id: "", product_name: "", colour: "", charm: "", quantity: "", notes: "" });

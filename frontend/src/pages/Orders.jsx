@@ -38,7 +38,9 @@ import TemplateDialog from "../components/TemplateDialog";
 const HEADER_ALIASES = {
   order_id: ["order_id", "orderid", "order id", "order", "id", "sub order no", "suborder", "sub_order_no"],
   product_name: ["product_name", "name", "name on product", "print name", "productname"],
-  charm: ["charm", "charms"],
+  colour: ["colour", "color", "colours", "colors"],
+  charm: ["charm", "charms", "charm number", "charm no"],
+  quantity: ["quantity", "qty", "pcs", "pieces"],
   notes: ["notes", "note", "remarks", "comment", "comments"],
 };
 
@@ -146,7 +148,7 @@ function OrderSheetDialog({ open, onClose, initial }) {
         <DialogHeader>
           <DialogTitle>Order sheet PDF</DialogTitle>
           <DialogDescription>
-            A printable table of the matching orders: date and time, order ID, name, charm, notes and phone. Filter by date, phone number,
+            A printable table of the matching orders: date and time, order ID, name, colour, charm, quantity, notes and phone. Filter by date, phone number,
             order ID, or any mix.
           </DialogDescription>
         </DialogHeader>
@@ -259,7 +261,7 @@ export default function Orders() {
 
   const startEdit = (o) => {
     setEditingId(o.id);
-    setEditDraft({ order_id: o.order_id, product_name: o.product_name, charm: o.charm, notes: o.notes });
+    setEditDraft({ order_id: o.order_id, product_name: o.product_name, colour: o.colour || "", charm: o.charm, quantity: o.quantity || "", notes: o.notes });
   };
 
   const saveEdit = async () => {
@@ -302,7 +304,7 @@ export default function Orders() {
       skipEmptyLines: true,
       complete: (res) => {
         const rows = res.data.map(mapCsvRow).filter((r) => Object.values(r).some(Boolean));
-        if (!rows.length) return toast.error("No rows found. Expected columns: order_id, product_name, charm, notes");
+        if (!rows.length) return toast.error("No rows found. Expected columns: order_id, product_name, colour, charm, quantity, notes");
         setImportRows(rows);
       },
       error: (err) => toast.error(`Could not read CSV: ${err.message}`),
@@ -377,7 +379,9 @@ export default function Orders() {
           <form onSubmit={submit} className="grid gap-4 md:grid-cols-2 lg:grid-cols-4" data-testid="order-form">
             {field("order_id", "Order ID", { placeholder: "e.g. 123456789012_1", className: "font-mono" })}
             {field("product_name", "Name on product", { placeholder: "e.g. Aarav" })}
-            {field("charm", "Charm", { placeholder: "e.g. Heart, gold" })}
+            {field("colour", "Colour", { placeholder: "e.g. Black" })}
+            {field("charm", "Charm", { placeholder: "e.g. Heart, or 5" })}
+            {field("quantity", "Quantity", { placeholder: "e.g. 1", inputMode: "numeric" })}
             {field("notes", "Notes", { placeholder: "Optional" })}
             <div className="md:col-span-2 lg:col-span-4">
               <Button type="submit" disabled={saving} data-testid="order-form-submit-btn">
@@ -397,7 +401,7 @@ export default function Orders() {
             <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
             <Input
               data-testid="orders-search-input"
-              placeholder="Search ID, name, charm, notes, phone"
+              placeholder="Search ID, name, colour, charm, notes, phone"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="pl-9"
@@ -465,7 +469,9 @@ export default function Orders() {
                 <tr>
                   <TH className="pl-5">Order ID</TH>
                   <TH>Name on product</TH>
+                  <TH>Colour</TH>
                   <TH>Charm</TH>
+                  <TH>Qty</TH>
                   <TH>Notes</TH>
                   <TH>Phone</TH>
                   <TH>Source</TH>
@@ -477,13 +483,13 @@ export default function Orders() {
                 {orders.map((o) =>
                   editingId === o.id ? (
                     <TR key={o.id} className="bg-forest-50/40">
-                      {["order_id", "product_name", "charm", "notes"].map((k, idx) => (
+                      {["order_id", "product_name", "colour", "charm", "quantity", "notes"].map((k, idx) => (
                         <TD key={k} className={idx === 0 ? "pl-5" : ""}>
                           <Input
                             data-testid={`edit-${k}-input`}
-                            value={editDraft[k]}
+                            value={editDraft[k] || ""}
                             onChange={(e) => setEditDraft({ ...editDraft, [k]: e.target.value })}
-                            className="h-9 min-w-[120px]"
+                            className={k === "quantity" ? "h-9 w-16" : "h-9 min-w-[110px]"}
                           />
                         </TD>
                       ))}
@@ -520,7 +526,9 @@ export default function Orders() {
                         </span>
                       </TD>
                       <TD>{o.product_name || <span className="text-muted">—</span>}</TD>
+                      <TD>{o.colour || <span className="text-muted">—</span>}</TD>
                       <TD>{o.charm || <span className="text-muted">—</span>}</TD>
+                      <TD className="tabular-nums">{o.quantity || <span className="text-muted">—</span>}</TD>
                       <TD className="max-w-[220px] truncate" title={o.notes}>
                         {o.notes || <span className="text-muted">—</span>}
                       </TD>

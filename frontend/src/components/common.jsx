@@ -72,7 +72,9 @@ export function EditableRows({ rows, setRows, testPrefix = "preview" }) {
   const cols = [
     ["order_id", "Order ID"],
     ["product_name", "Name on product"],
+    ["colour", "Colour"],
     ["charm", "Charm"],
+    ["quantity", "Qty"],
     ["notes", "Notes"],
   ];
   return (

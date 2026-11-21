@@ -23,7 +23,7 @@ sys.path.insert(0, str(BACKEND))
 load_dotenv(BACKEND / ".env")
 
 SCHEMA = "charm_test_filters"
-os.environ.update({"DB_SCHEMA": SCHEMA, "AUTH_SECRET": secrets.token_urlsafe(48), "ADMIN_PASSWORD": "legacy-pass-123",
+os.environ.update({"DB_SCHEMA": SCHEMA, "AUTH_SECRET": secrets.token_urlsafe(48), "ADMIN_PASSWORD": "legacy-pass-123", "BOT_REPLY_WAIT_SECONDS": "0",
                    "RESET_PASSWORD": "", "WA_NUMBERS": "", "ANTHROPIC_API_KEY": "", "AI_PROVIDER": "anthropic"})
 
 

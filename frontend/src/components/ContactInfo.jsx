@@ -257,7 +257,7 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
                   <Package size={18} className="shrink-0 text-muted" />
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-mono text-[13px]">{o.order_id || "(no order ID)"}</div>
-                    <div className="truncate text-[11px] text-muted">{[o.product_name, o.charm, o.notes].filter(Boolean).join(" · ") || "No details yet"}</div>
+                    <div className="truncate text-[11px] text-muted">{[o.product_name, o.colour, o.charm && `Charm ${o.charm}`, o.quantity && o.quantity !== "1" && `Qty ${o.quantity}`, o.notes].filter(Boolean).join(" · ") || "No details yet"}</div>
                   </div>
                   {o.confirmed_at && <span className="text-[10px] font-medium text-forest">Confirmed</span>}
                 </button>

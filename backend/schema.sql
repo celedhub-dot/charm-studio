@@ -102,6 +102,9 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_at timestamptz;
 -- The Meesho/Flipkart order date, read from the customer's chat or the shipping label (NULL = unknown)
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_date date;
 CREATE INDEX IF NOT EXISTS orders_order_date_idx ON orders (order_date);
+-- Colour and quantity the customer chose (free text, as written)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS colour   text NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity text NOT NULL DEFAULT '';
 
 -- Every WhatsApp message in and out (customer, bot, staff, or sent from the phone app).
 CREATE TABLE IF NOT EXISTS wa_messages (
@@ -140,6 +143,10 @@ CREATE INDEX IF NOT EXISTS wa_contacts_recent_idx ON wa_contacts (last_message_a
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS read_due_at   timestamptz;
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS read_attempts int NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS wa_contacts_read_due_idx ON wa_contacts (read_due_at) WHERE read_due_at IS NOT NULL;
+-- Ask-questions bot: reply once the customer pauses (bot_since = first unanswered message)
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS bot_due_at timestamptz;
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS bot_since  timestamptz;
+CREATE INDEX IF NOT EXISTS wa_contacts_bot_due_idx ON wa_contacts (bot_due_at) WHERE bot_due_at IS NOT NULL;
 
 -- Lock the tables away from Supabase's public REST API (anon/authenticated keys).
 -- The backend connects as the table owner, which is not affected by RLS.

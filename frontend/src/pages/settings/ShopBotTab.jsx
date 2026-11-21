@@ -14,7 +14,7 @@ const BOT_FIELDS = [
   { key: "ask_notes", label: "4. Notes", help: "Customers can reply none, no, skip or - to leave notes empty." },
   { key: "thank_you", label: "5. Thank-you message", help: "Sent once all four answers are in.", rows: 6 },
 ];
-const PLACEHOLDERS = ["{shop_name}", "{order_id}", "{name}", "{charm}", "{notes}"];
+const PLACEHOLDERS = ["{shop_name}", "{order_id}", "{name}", "{charm}", "{colour}", "{quantity}", "{extra}", "{notes}"];
 
 function fill(text, values) {
   return Object.entries(values).reduce((t, [k, v]) => t.split(`{${k}}`).join(v), text || "");
@@ -75,6 +75,9 @@ function BotCard() {
         order_id: "123456789012_1",
         name: "Aarav",
         charm: "Heart",
+        colour: "Black",
+        quantity: "2",
+        extra: "\nColour: Black\nQuantity: 2", // {extra}: colour and quantity lines, only when the customer gave them
         notes: "Gift wrap",
       }),
     [form.thank_you, settings?.shop?.shop_name]
