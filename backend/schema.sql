@@ -147,6 +147,10 @@ CREATE INDEX IF NOT EXISTS wa_contacts_read_due_idx ON wa_contacts (read_due_at)
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS bot_due_at timestamptz;
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS bot_since  timestamptz;
 CREATE INDEX IF NOT EXISTS wa_contacts_bot_due_idx ON wa_contacts (bot_due_at) WHERE bot_due_at IS NOT NULL;
+-- Chat list menu: pinned to the top, muted (left out of the unread count), archived (hidden until a new message)
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS pinned_at timestamptz;
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS muted     boolean NOT NULL DEFAULT false;
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS archived  boolean NOT NULL DEFAULT false;
 
 -- Lock the tables away from Supabase's public REST API (anon/authenticated keys).
 -- The backend connects as the table owner, which is not affected by RLS.

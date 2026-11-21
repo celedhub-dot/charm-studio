@@ -133,10 +133,15 @@ export const waConversations = () => api.get("/wa/conversations").then((r) => r.
 
 // Chats (team inbox)
 const threadPath = (label, phone) => `/inbox/conversations/${encodeURIComponent(label)}/${encodeURIComponent(phone)}`;
-export const getConversations = (q, number) =>
-  api.get("/inbox/conversations", { params: { q: q || undefined, number: number || undefined } }).then((r) => r.data);
+export const getConversations = (q, number, archived = false) =>
+  api
+    .get("/inbox/conversations", { params: { q: q || undefined, number: number || undefined, archived: archived || undefined } })
+    .then((r) => r.data);
 export const getThread = (label, phone) => api.get(threadPath(label, phone)).then((r) => r.data);
 export const deleteChat = (label, phone) => api.delete(threadPath(label, phone)).then((r) => r.data);
+// { pinned, muted, archived, unread }: any of them, true/false
+export const setChatState = (label, phone, state) => api.patch(threadPath(label, phone), state).then((r) => r.data);
+export const clearChat = (label, phone) => api.post(`${threadPath(label, phone)}/clear`).then((r) => r.data);
 export const readOrdersAgain = (label, phone) => api.post(`${threadPath(label, phone)}/read-orders`).then((r) => r.data);
 export const sendInboxMessage = (numberLabel, to, text) =>
   api.post("/inbox/send", { number_label: numberLabel, to, text }).then((r) => r.data);

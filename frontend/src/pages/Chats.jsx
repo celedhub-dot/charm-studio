@@ -23,6 +23,9 @@ import {
   Paperclip,
   X,
   Info,
+  Archive,
+  PushPin,
+  BellSlash,
 } from "@phosphor-icons/react";
 import {
   getConversations,
@@ -31,6 +34,7 @@ import {
   sendInboxMedia,
   readOrdersAgain,
   deleteChat,
+  getUnread,
   updateOrder,
   createOrder,
   waNumbers,
@@ -44,6 +48,7 @@ import { cn, timeAgo } from "../lib/utils";
 import TemplateDialog from "../components/TemplateDialog";
 import MessageMedia, { fmtSize } from "../components/MessageMedia";
 import ContactInfo, { Avatar, fmtPhone } from "../components/ContactInfo";
+import ChatMenu from "../components/ChatMenu";
 
 const ORDER_FIELDS = ["order_id", "product_name", "colour", "charm", "quantity", "notes"];
 const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -84,7 +89,10 @@ function hoursLeft(iso) {
 }
 
 /* ---------- Conversation list ---------- */
-function ConversationList({ items, loading, selected, onSelect, query, setQuery, numbers, number, setNumber }) {
+function ConversationList({
+  items, loading, selected, onSelect, query, setQuery, numbers, number, setNumber,
+  archivedView, setArchivedView, archivedInfo, onChatChanged, onChatDeleted,
+}) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="space-y-2 border-b border-line p-3">
@@ -108,21 +116,54 @@ function ConversationList({ items, loading, selected, onSelect, query, setQuery,
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto" data-testid="chats-list">
+        {archivedView ? (
+          <button
+            type="button"
+            onClick={() => setArchivedView(false)}
+            className="flex w-full items-center gap-4 border-b border-[#E9EDEF] px-4 py-3 text-left text-[15px] font-medium text-[#111b21] hover:bg-[#F5F6F6]"
+            data-testid="archived-back"
+          >
+            <ArrowLeft size={18} className="text-[#54656F]" /> Archived
+          </button>
+        ) : (
+          !query &&
+          archivedInfo.archived > 0 && (
+            <button
+              type="button"
+              onClick={() => setArchivedView(true)}
+              className="flex w-full items-center gap-4 px-4 py-3 text-left hover:bg-[#F5F6F6]"
+              data-testid="archived-row"
+            >
+              <span className="grid w-[46px] place-items-center">
+                <Archive size={20} className="text-[#1DAA61]" />
+              </span>
+              <span className="flex-1 text-[15px] text-[#111b21]">Archived</span>
+              <span className={cn("text-[12px]", archivedInfo.archived_unread ? "font-medium text-[#1DAA61]" : "text-muted")}>
+                {archivedInfo.archived_unread || archivedInfo.archived}
+              </span>
+            </button>
+          )
+        )}
         {loading && items.length === 0 ? (
           <div className="flex justify-center py-10 text-muted">
             <Spinner />
           </div>
         ) : items.length === 0 ? (
-          <p className="p-6 text-center text-sm text-muted">{query ? "No chats match your search." : "No chats yet."}</p>
+          <p className="p-6 text-center text-sm text-muted">
+            {query ? "No chats match your search." : archivedView ? "No archived chats." : "No chats yet."}
+          </p>
         ) : (
           items.map((c) => {
             const active = selected && selected.label === c.number_label && selected.phone === c.customer_phone;
             return (
-              <button
+              <div
                 key={`${c.number_label}|${c.customer_phone}`}
+                role="button"
+                tabIndex={0}
                 data-testid={`chat-item-${c.customer_phone}`}
                 onClick={() => onSelect({ label: c.number_label, phone: c.customer_phone })}
-                className={cn("flex w-full items-center gap-3 pl-3 text-left transition-colors", active ? "bg-[#F0F2F5]" : "hover:bg-[#F5F6F6]")}
+                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && e.target === e.currentTarget && onSelect({ label: c.number_label, phone: c.customer_phone })}
+                className={cn("group flex w-full cursor-pointer items-center gap-3 pl-3 text-left transition-colors", active ? "bg-[#F0F2F5]" : "hover:bg-[#F5F6F6]")}
               >
                 <Avatar name={c.name} phone={c.customer_phone} size={46} />
                 <div className="min-w-0 flex-1 border-b border-[#E9EDEF] py-3 pr-3">
@@ -133,9 +174,24 @@ function ConversationList({ items, loading, selected, onSelect, query, setQuery,
                   {c.name && <div className="truncate font-mono text-[11px] text-muted">{fmtPhone(c.customer_phone)}</div>}
                   <div className="mt-0.5 flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[13px] text-[#667781]">{c.last_preview}</span>
+                    {c.muted && <BellSlash size={15} className="shrink-0 text-[#8696A0]" aria-label="Muted" />}
+                    {c.pinned_at && !c.archived && <PushPin size={15} weight="fill" className="shrink-0 text-[#8696A0]" aria-label="Pinned" />}
                     {c.unread > 0 && (
-                      <span className="grid h-5 min-w-5 place-items-center rounded-full bg-[#25D366] px-1.5 text-[11px] font-semibold text-white">{c.unread}</span>
+                      <span
+                        className={cn(
+                          "grid h-5 min-w-5 place-items-center rounded-full px-1.5 text-[11px] font-semibold text-white",
+                          c.muted ? "bg-[#C2C7CA]" : "bg-[#25D366]"
+                        )}
+                      >
+                        {c.unread}
+                      </span>
                     )}
+                    <ChatMenu
+                      chat={c}
+                      onChanged={onChatChanged}
+                      onDeleted={() => onChatDeleted(c)}
+                      onMarkedUnread={active ? () => onSelect(null) : undefined}
+                    />
                   </div>
                   <div className="mt-1 flex flex-wrap gap-1">
                     {numbers.length > 1 && <Badge variant="outline">{c.number_label}</Badge>}
@@ -146,7 +202,7 @@ function ConversationList({ items, loading, selected, onSelect, query, setQuery,
                     )}
                   </div>
                 </div>
-              </button>
+              </div>
             );
           })
         )}
@@ -734,17 +790,21 @@ export default function Chats() {
   const [query, setQuery] = useState("");
   const [number, setNumber] = useState("");
   const [numbers, setNumbers] = useState([]);
+  const [archivedView, setArchivedView] = useState(false);
+  const [archivedInfo, setArchivedInfo] = useState({ archived: 0, archived_unread: 0 });
   const sel = useMemo(() => (params.get("phone") && params.get("number") ? { label: params.get("number"), phone: params.get("phone") } : null), [params]);
 
   const load = useCallback(async () => {
     try {
-      setItems(await getConversations(query.trim(), number));
+      const [list, counts] = await Promise.all([getConversations(query.trim(), number, archivedView), getUnread()]);
+      setItems(list);
+      setArchivedInfo(counts);
     } catch (e) {
       /* keep the last list while polling */
     } finally {
       setLoading(false);
     }
-  }, [query, number]);
+  }, [query, number, archivedView]);
 
   useEffect(() => {
     const t = setTimeout(load, 250);
@@ -762,6 +822,23 @@ export default function Chats() {
   }, []);
 
   const select = (s) => setParams(s ? { number: s.label, phone: s.phone } : {}, { replace: false });
+  const sameChat = (a, b) => a.number_label === b.number_label && a.customer_phone === b.customer_phone;
+  const chatChanged = (updated) => {
+    // show the change straight away (a chat archived/unarchived leaves this list), then refresh from the server
+    const pinned = (x) => (x.pinned_at && !x.archived ? 1 : 0);
+    setItems((list) =>
+      list
+        .map((x) => (sameChat(x, updated) ? { ...x, ...updated } : x))
+        .filter((x) => query.trim() || !!x.archived === archivedView)
+        .sort((a, b) => pinned(b) - pinned(a) || (b.pinned_at || "").localeCompare(a.pinned_at || "") || b.last_message_at.localeCompare(a.last_message_at))
+    );
+    load();
+  };
+  const chatDeleted = (c) => {
+    setItems((list) => list.filter((x) => !sameChat(x, c)));
+    if (sel && sel.label === c.number_label && sel.phone === c.customer_phone) select(null);
+    load();
+  };
 
   return (
     <div className="-mx-4 -my-6 sm:-mx-6 lg:-mx-10 lg:-my-10">
@@ -786,6 +863,15 @@ export default function Chats() {
               numbers={numbers}
               number={number}
               setNumber={setNumber}
+              archivedView={archivedView}
+              setArchivedView={(v) => {
+                setLoading(true);
+                setItems([]);
+                setArchivedView(v);
+              }}
+              archivedInfo={archivedInfo}
+              onChatChanged={chatChanged}
+              onChatDeleted={chatDeleted}
             />
           </div>
         </div>

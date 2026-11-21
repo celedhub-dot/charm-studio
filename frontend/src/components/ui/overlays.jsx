@@ -51,10 +51,12 @@ export const DialogDescription = React.forwardRef(({ className, ...props }, ref)
 DialogDescription.displayName = "DialogDescription";
 
 /* Confirm dialog (AlertDialog) */
-export function ConfirmDialog({ trigger, title, description, confirmLabel = "Confirm", onConfirm, testId = "confirm" }) {
+// With `trigger` it opens from that button; or control it with `open` / `onOpenChange` (e.g. from a menu item).
+export function ConfirmDialog({ trigger, title, description, confirmLabel = "Confirm", onConfirm, testId = "confirm", open, onOpenChange }) {
+  const controlled = open !== undefined ? { open, onOpenChange } : {};
   return (
-    <AlertPrimitive.Root>
-      <AlertPrimitive.Trigger asChild>{trigger}</AlertPrimitive.Trigger>
+    <AlertPrimitive.Root {...controlled}>
+      {trigger && <AlertPrimitive.Trigger asChild>{trigger}</AlertPrimitive.Trigger>}
       <AlertPrimitive.Portal>
         <AlertPrimitive.Overlay className="fixed inset-0 z-50 bg-ink/40 backdrop-blur-[2px]" />
         <AlertPrimitive.Content className="fixed left-1/2 top-1/2 z-50 grid w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 gap-4 rounded-2xl border border-line bg-white p-6 shadow-lift">

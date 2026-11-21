@@ -2218,7 +2218,8 @@ async def record_message(
                                    THEN GREATEST(COALESCE(wa_contacts.last_inbound_at, EXCLUDED.last_message_at),
                                                  EXCLUDED.last_message_at)
                                    ELSE wa_contacts.last_inbound_at END,
-            unread = CASE WHEN $6::boolean THEN wa_contacts.unread + 1 ELSE wa_contacts.unread END
+            unread = CASE WHEN $6::boolean THEN wa_contacts.unread + 1 ELSE wa_contacts.unread END,
+            archived = CASE WHEN $6::boolean THEN false ELSE wa_contacts.archived END
         """,
         label, phone, name, preview, at, direction == "in",
     )
@@ -3179,9 +3180,13 @@ def conversation_public(r: asyncpg.Record) -> Dict[str, Any]:
 
 
 @api.get("/inbox/conversations")
-async def inbox_conversations(q: Optional[str] = None, number: Optional[str] = None, limit: int = 60):
+async def inbox_conversations(
+    q: Optional[str] = None, number: Optional[str] = None, limit: int = 60, archived: bool = False
+):
     conds: List[str] = []
     args: List[Any] = []
+    if not (q and q.strip()):  # searching looks through archived chats too
+        conds.append("c.archived" if archived else "NOT c.archived")
     if number:
         args.append(number)
         conds.append(f"c.number_label = ${len(args)}")
@@ -3206,7 +3211,8 @@ async def inbox_conversations(q: Optional[str] = None, number: Optional[str] = N
         f"""SELECT c.*, (SELECT count(*) FROM orders o WHERE o.customer_phone = c.customer_phone
                           AND c.customer_phone <> '') AS order_count
             FROM wa_contacts c {"WHERE " + " AND ".join(conds) if conds else ""}
-            ORDER BY c.last_message_at DESC LIMIT ${len(args)}""",
+            ORDER BY (c.pinned_at IS NOT NULL AND NOT c.archived) DESC, c.pinned_at DESC NULLS LAST,
+                     c.last_message_at DESC LIMIT ${len(args)}""",
         *args,
     )
     return [conversation_public(r) for r in rows]
@@ -3214,7 +3220,12 @@ async def inbox_conversations(q: Optional[str] = None, number: Optional[str] = N
 
 @api.get("/inbox/unread")
 async def inbox_unread():
-    return {"unread": int(await db().fetchval("SELECT COALESCE(sum(unread), 0) FROM wa_contacts") or 0)}
+    row = await db().fetchrow(
+        "SELECT COALESCE(sum(unread) FILTER (WHERE NOT muted), 0) AS unread, "  # muted chats don't add to the count
+        "count(*) FILTER (WHERE archived) AS archived, "
+        "COALESCE(sum(unread) FILTER (WHERE archived AND NOT muted), 0) AS archived_unread FROM wa_contacts"
+    )
+    return {"unread": int(row["unread"]), "archived": int(row["archived"]), "archived_unread": int(row["archived_unread"])}
 
 
 async def _thread(label: str, phone: str) -> Dict[str, Any]:
@@ -3270,6 +3281,60 @@ async def inbox_read_orders(label: str, phone: str):
     await _thread(label, phone)  # 404 if unknown
     result = await read_order_details(label, phone)
     return {**result, "ai_ready": ai_ready()}
+
+
+class ChatStateIn(BaseModel):
+    pinned: Optional[bool] = None
+    muted: Optional[bool] = None
+    archived: Optional[bool] = None
+    unread: Optional[bool] = None  # true = mark as unread, false = mark as read
+
+
+@api.patch("/inbox/conversations/{label}/{phone}")
+async def inbox_chat_state(label: str, phone: str, payload: ChatStateIn):
+    """Pin, mute, archive, or mark a chat read/unread (shared by the whole team)."""
+    sets: List[str] = []
+    if payload.pinned is not None:
+        sets.append("pinned_at = now()" if payload.pinned else "pinned_at = NULL")
+    if payload.muted is not None:
+        sets.append(f"muted = {'true' if payload.muted else 'false'}")
+    if payload.archived is not None:
+        sets.append(f"archived = {'true' if payload.archived else 'false'}")
+        if payload.archived and payload.pinned is None:
+            sets.append("pinned_at = NULL")  # archiving unpins, like on a phone
+    if payload.unread is not None:
+        sets.append("unread = GREATEST(unread, 1)" if payload.unread else "unread = 0")
+    if not sets:
+        raise HTTPException(400, "Nothing to change.")
+    row = await db().fetchrow(
+        f"UPDATE wa_contacts c SET {', '.join(sets)} WHERE number_label = $1 AND customer_phone = $2 "
+        "RETURNING c.*, (SELECT count(*) FROM orders o WHERE o.customer_phone = c.customer_phone "
+        "AND c.customer_phone <> '') AS order_count",
+        label, phone,
+    )
+    if not row:
+        raise HTTPException(404, "No chat with this customer on that number.")
+    return conversation_public(row)
+
+
+@api.post("/inbox/conversations/{label}/{phone}/clear")
+async def inbox_clear_chat(label: str, phone: str):
+    """Remove the chat's messages but keep the chat (and its 24-hour reply window). Orders are kept."""
+    async with db().acquire() as conn:
+        async with conn.transaction():
+            exists = await conn.fetchval(
+                "UPDATE wa_contacts SET last_preview = '', unread = 0 WHERE number_label = $1 AND customer_phone = $2 "
+                "RETURNING 1", label, phone,
+            )
+            if not exists:
+                raise HTTPException(404, "No chat with this customer on that number.")
+            media = await conn.fetch(
+                "DELETE FROM wa_messages WHERE number_label = $1 AND customer_phone = $2 RETURNING media_id",
+                label, phone,
+            )
+    for row in media:
+        MEDIA_CACHE.pop(row["media_id"], None)
+    return {"cleared": len(media)}
 
 
 @api.delete("/inbox/conversations/{label}/{phone}")

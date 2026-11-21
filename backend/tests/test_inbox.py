@@ -216,15 +216,42 @@ try:
         check(bad.status_code == 400, "period over 3 months refused")
         check(c.get("/api/orders/sheet.pdf", params=params).status_code == 401, "sheet needs login")
 
+        print("Chat menu: pin, mute, archive, read/unread, clear")
+        A, B = "919876543210", "919111111111"
+        base = "/api/inbox/conversations/Main Shop/"
+        order = lambda **p: [x["customer_phone"] for x in c.get("/api/inbox/conversations", headers=H(tok), params=p).json()]  # noqa: E731
+        check(c.patch(base + B, headers=H(tok), json={"pinned": True}).json()["pinned_at"], "chat pinned")
+        check(order()[0] == B, "pinned chat on top", order())
+        c.patch(base + B, headers=H(tok), json={"pinned": False})
+        c.patch(base + A, headers=H(tok), json={"unread": True})
+        unread = c.get("/api/inbox/unread", headers=H(tok)).json()["unread"]
+        check(unread >= 1, "mark as unread counts", unread)
+        c.patch(base + A, headers=H(tok), json={"muted": True})
+        check(c.get("/api/inbox/unread", headers=H(tok)).json()["unread"] == unread - 1, "muted chat left out of the unread count")
+        c.patch(base + A, headers=H(tok), json={"muted": False, "unread": False})
+        check(c.get("/api/inbox/unread", headers=H(tok)).json()["unread"] == unread - 1, "mark as read")
+        r = c.patch(base + A, headers=H(tok), json={"archived": True}).json()
+        check(r["archived"] and A not in order() and order(archived="true") == [A], "archived chat moves to Archived")
+        check(c.get("/api/inbox/unread", headers=H(tok)).json()["archived"] == 1, "archived count for the Archived row")
+        check(A in order(q="riya"), "search still finds archived chats")
+        c.post(hook, json=meta_payload([text_msg("wamid.BACK1", A, "hello again")]))
+        check(A in order() and not order(archived="true"), "a new customer message brings it back")
+        r = c.post(base + A + "/clear", headers=H(tok))
+        th = c.get(base + A, headers=H(tok)).json()
+        check(r.status_code == 200 and th["messages"] == [] and th["contact"]["window_open"], "clear chat: messages gone, chat and reply window kept", r.text)
+        check(c.get("/api/orders?q=123456789012", headers=H(tok)).json(), "clear chat keeps orders")
+        check(c.patch(base + "910000000000", headers=H(tok), json={"pinned": True}).status_code == 404, "unknown chat: not found")
+        c.post(hook, json=meta_payload([text_msg("wamid.BACK2", A, "Order 123456789012-1 thanks")]))  # for the checks below
+
         print("Contact info stats")
         st = c.get("/api/inbox/conversations/Main Shop/919876543210", headers=H(tok)).json()["stats"]
-        check(st["messages"] >= 2 and st["from_customer"] >= 1 and st["first_message_at"] and st["photos"] == 0, "chat stats for the contact panel", st)
+        check(st["messages"] >= 1 and st["from_customer"] >= 1 and st["first_message_at"] and st["photos"] == 0, "chat stats for the contact panel", st)
 
         print("Delete a chat")
         before = len(c.get("/api/inbox/conversations", headers=H(tok)).json())
         check(c.delete("/api/inbox/conversations/Main Shop/919876543210").status_code == 401, "delete needs login")
         r = c.delete("/api/inbox/conversations/Main Shop/919876543210", headers=H(tok))
-        check(r.status_code == 200 and r.json()["messages"] >= 2, "chat deleted", r.text)
+        check(r.status_code == 200 and r.json()["messages"] >= 1, "chat deleted", r.text)
         check(c.get("/api/inbox/conversations/Main Shop/919876543210", headers=H(tok)).status_code == 404, "chat is gone")
         check(len(c.get("/api/inbox/conversations", headers=H(tok)).json()) == before - 1, "removed from the Chats list")
         left = asyncio.run(count_rows("919876543210"))
