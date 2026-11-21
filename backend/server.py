@@ -2023,8 +2023,19 @@ def _api_error(resp: httpx.Response) -> str:
         err = data.get("error") or (data.get("errors") or [{}])[0]
         if isinstance(err, dict):
             msg = str(err.get("message") or err.get("title") or err.get("details") or f"HTTP {resp.status_code}")
-            if "error" in data and is_token_error(err):  # Meta's format (360dialog uses "errors")
-                msg += TOKEN_HELP
+            if "error" in data:  # Meta's format (360dialog uses "errors")
+                # Meta's code, sub-code and details pinpoint the cause; keep them so problems can be diagnosed
+                extra = [f"code {err['code']}" if err.get("code") is not None else "",
+                         f"subcode {err['error_subcode']}" if err.get("error_subcode") else ""]
+                details = (err.get("error_data") or {}).get("details") if isinstance(err.get("error_data"), dict) else ""
+                if details and details not in msg:
+                    extra.append(str(details)[:200])
+                if err.get("fbtrace_id"):
+                    extra.append(f"trace {err['fbtrace_id']}")
+                if any(extra):
+                    msg += " (" + "; ".join(x for x in extra if x) + ")"
+                if is_token_error(err):
+                    msg += TOKEN_HELP
             return msg
     return f"HTTP {resp.status_code}"
 

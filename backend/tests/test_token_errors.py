@@ -41,7 +41,10 @@ check(auth.startswith("Authorization Error") and "Settings > WhatsApp numbers" i
 check("whatsapp_business_messaging" in server._api_error(resp(403, {"error": {"message": "(#200) Permissions error", "code": 200}})), "permission error explained")
 check("Settings" in server._api_error(resp(401, {"error": {"message": "Session has expired", "code": 190}})), "expired token explained")
 plain = server._api_error(resp(400, {"error": {"message": "Recipient phone number not in allowed list", "code": 131030}}))
-check(plain == "Recipient phone number not in allowed list", "other errors unchanged")
+check(plain == "Recipient phone number not in allowed list (code 131030)", "other errors keep their text, plus Meta's code")
+full = server._api_error(resp(401, {"error": {"message": "Authorization Error", "code": 0, "error_subcode": 2494102,
+                                              "error_data": {"details": "App not linked to this account"}, "fbtrace_id": "AbC123"}}))
+check("code 0; subcode 2494102; App not linked to this account; trace AbC123" in full, "Meta's sub-code, details and trace kept", full)
 check(server._api_error(resp(400, {"errors": [{"title": "Invalid recipient"}]})) == "Invalid recipient", "360dialog errors unchanged")
 
 print("Check button")
