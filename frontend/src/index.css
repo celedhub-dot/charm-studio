@@ -26,3 +26,46 @@
     @apply transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lift;
   }
 }
+
+/* Chats: a familiar chat look (soft patterned background, green sent bubbles with little tails) */
+@layer components {
+  .chat-wallpaper {
+    background-color: #efeae2;
+    background-image: radial-gradient(rgba(84, 67, 44, 0.07) 1px, transparent 1.2px),
+      radial-gradient(rgba(84, 67, 44, 0.05) 1px, transparent 1.2px);
+    background-size: 22px 22px, 22px 22px;
+    background-position: 0 0, 11px 11px;
+  }
+  .bubble {
+    @apply relative rounded-lg px-2.5 pb-1.5 pt-1.5 text-[14.2px] leading-[19px] text-[#111b21];
+    box-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
+  }
+  .bubble-out {
+    background: #d9fdd3;
+  }
+  .bubble-in {
+    background: #ffffff;
+  }
+  .bubble-out.bubble-tail {
+    border-top-right-radius: 0;
+  }
+  .bubble-in.bubble-tail {
+    border-top-left-radius: 0;
+  }
+  .bubble-tail::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    width: 0;
+    height: 0;
+    border-bottom: 10px solid transparent;
+  }
+  .bubble-out.bubble-tail::before {
+    right: -8px;
+    border-left: 8px solid #d9fdd3;
+  }
+  .bubble-in.bubble-tail::before {
+    left: -8px;
+    border-right: 8px solid #ffffff;
+  }
+}

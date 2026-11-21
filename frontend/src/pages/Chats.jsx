@@ -22,7 +22,7 @@ import {
   SealCheck,
   Paperclip,
   X,
-  Trash,
+  Info,
 } from "@phosphor-icons/react";
 import {
   getConversations,
@@ -37,17 +37,46 @@ import {
   errorMessage,
 } from "../lib/api";
 import { Input, Label, Textarea, Badge, Spinner } from "../components/ui/primitives";
-import { SimpleSelect, ConfirmDialog } from "../components/ui/overlays";
+import { SimpleSelect } from "../components/ui/overlays";
 import { Button } from "../components/ui/button";
 import { EmptyState, SourceBadge } from "../components/common";
 import { cn, timeAgo } from "../lib/utils";
 import TemplateDialog from "../components/TemplateDialog";
 import MessageMedia, { fmtSize } from "../components/MessageMedia";
+import ContactInfo, { Avatar, fmtPhone } from "../components/ContactInfo";
 
 const ORDER_FIELDS = ["order_id", "product_name", "charm", "notes"];
-const fmtPhone = (p) => (p ? `+${p}` : "");
 const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const fmtDay = (iso) => new Date(iso).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+// Like a phone chat app: "14:05" today, "Yesterday", the weekday this week, then the date.
+function listTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const days = Math.round((dayStart(new Date()) - dayStart(d)) / 86400000);
+  if (days <= 0) return fmtTime(iso);
+  if (days === 1) return "Yesterday";
+  if (days < 7) return d.toLocaleDateString([], { weekday: "long" });
+  return d.toLocaleDateString([], { day: "2-digit", month: "2-digit", year: "2-digit" });
+}
+// Web links in messages open in a new tab (as text only: never rendered as HTML).
+function linkify(text) {
+  return text.split(/(\bhttps?:\/\/[^\s<>"')]+)/gi).map((part, i) =>
+    i % 2 ? (
+      <a key={i} href={part} target="_blank" rel="noopener noreferrer nofollow" className="break-all text-[#027EB5] hover:underline">
+        {part}
+      </a>
+    ) : (
+      part
+    )
+  );
+}
+function dayLabel(iso) {
+  const days = Math.round((dayStart(new Date()) - dayStart(new Date(iso))) / 86400000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return fmtDay(iso);
+}
 
 function hoursLeft(iso) {
   if (!iso) return 0;
@@ -93,24 +122,19 @@ function ConversationList({ items, loading, selected, onSelect, query, setQuery,
                 key={`${c.number_label}|${c.customer_phone}`}
                 data-testid={`chat-item-${c.customer_phone}`}
                 onClick={() => onSelect({ label: c.number_label, phone: c.customer_phone })}
-                className={cn(
-                  "flex w-full items-start gap-3 border-b border-line/60 px-3 py-3 text-left transition-colors",
-                  active ? "bg-forest-50" : "hover:bg-cream"
-                )}
+                className={cn("flex w-full items-center gap-3 pl-3 text-left transition-colors", active ? "bg-[#F0F2F5]" : "hover:bg-[#F5F6F6]")}
               >
-                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-sand font-heading text-sm font-bold text-forest">
-                  {(c.name || c.customer_phone).slice(0, 1).toUpperCase()}
-                </div>
-                <div className="min-w-0 flex-1">
+                <Avatar name={c.name} phone={c.customer_phone} size={46} />
+                <div className="min-w-0 flex-1 border-b border-[#E9EDEF] py-3 pr-3">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-semibold text-ink">{c.name || fmtPhone(c.customer_phone)}</span>
-                    <span className="shrink-0 text-[11px] text-muted">{timeAgo(c.last_message_at)}</span>
+                    <span className="truncate text-[15px] text-[#111b21]">{c.name || fmtPhone(c.customer_phone)}</span>
+                    <span className={cn("shrink-0 text-[11px]", c.unread > 0 ? "font-medium text-[#1DAA61]" : "text-muted")}>{listTime(c.last_message_at)}</span>
                   </div>
                   {c.name && <div className="truncate font-mono text-[11px] text-muted">{fmtPhone(c.customer_phone)}</div>}
                   <div className="mt-0.5 flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate text-xs text-muted">{c.last_preview}</span>
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-[#667781]">{c.last_preview}</span>
                     {c.unread > 0 && (
-                      <span className="grid h-5 min-w-5 place-items-center rounded-full bg-terracotta px-1.5 text-[10px] font-bold text-white">{c.unread}</span>
+                      <span className="grid h-5 min-w-5 place-items-center rounded-full bg-[#25D366] px-1.5 text-[11px] font-semibold text-white">{c.unread}</span>
                     )}
                   </div>
                   <div className="mt-1 flex flex-wrap gap-1">
@@ -145,10 +169,15 @@ function StatusTick({ m }) {
         <WarningCircle size={13} weight="fill" />
       </span>
     );
-  if (m.status === "read") return <Checks size={14} className="text-sky-600" />;
-  if (m.status === "delivered") return <Checks size={14} className="text-muted" />;
-  return <Check size={13} className="text-muted" />;
+  if (m.status === "read") return <Checks size={16} weight="bold" className="text-[#53BDEB]" />;
+  if (m.status === "delivered") return <Checks size={16} weight="bold" className="text-[#8696A0]" />;
+  return <Check size={15} weight="bold" className="text-[#8696A0]" />;
 }
+
+// Messages from the same side (and same sender) within a few minutes are grouped: only the first gets a tail.
+const sameGroup = (a, b) =>
+  a && b && a.direction === b.direction && a.source === b.source && fmtDay(a.created_at) === fmtDay(b.created_at) &&
+  new Date(b.created_at) - new Date(a.created_at) < 5 * 60 * 1000;
 
 function MessageList({ messages, namePrefix }) {
   const endRef = useRef(null);
@@ -159,31 +188,33 @@ function MessageList({ messages, namePrefix }) {
 
   let lastDay = "";
   return (
-    <div className="space-y-1.5 px-4 py-4">
-      {messages.map((m) => {
+    <div className="px-[4%] py-3 sm:px-[6%]">
+      {messages.map((m, i) => {
         const day = fmtDay(m.created_at);
         const showDay = day !== lastDay;
         lastDay = day;
         const out = m.direction === "out";
         const src = SOURCE_META[m.source];
+        const first = !sameGroup(messages[i - 1], m);
         return (
-          <div key={m.id}>
+          <div key={m.id} className={first ? "mt-3" : "mt-0.5"}>
             {showDay && (
               <div className="my-3 flex justify-center">
-                <span className="rounded-full bg-white/80 px-3 py-0.5 text-[11px] text-muted shadow-card">{day}</span>
+                <span className="rounded-lg bg-white px-3 py-1 text-[12.5px] text-[#54656F] shadow-[0_1px_0.5px_rgba(11,20,26,0.13)]">{dayLabel(m.created_at)}</span>
               </div>
             )}
-            <div className={cn("flex", out ? "justify-end" : "justify-start")} data-testid={`msg-${m.id}`}>
+            <div className={cn("flex", out ? "justify-end pr-2" : "justify-start pl-2")} data-testid={`msg-${m.id}`}>
               <div
                 className={cn(
-                  "max-w-[82%] rounded-2xl px-3 py-2 text-sm shadow-card",
-                  out ? "rounded-br-sm bg-forest-50 text-ink" : "rounded-bl-sm bg-white text-ink",
+                  "bubble max-w-[85%] sm:max-w-[65%]",
+                  out ? "bubble-out" : "bubble-in",
+                  first && "bubble-tail",
                   m.status === "failed" && "ring-1 ring-danger/40"
                 )}
               >
-                {out && src && (
-                  <div className="mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-forest">
-                    <src.icon size={11} /> {src.label}
+                {out && src && first && (
+                  <div className="mb-0.5 flex items-center gap-1 text-[12px] font-medium text-[#1F7A4D]">
+                    <src.icon size={12} /> {src.label}
                   </div>
                 )}
                 {m.media_id ? (
@@ -194,13 +225,21 @@ function MessageList({ messages, namePrefix }) {
                   !["text", "template"].includes(m.kind) && <div className="mb-0.5 text-[11px] font-medium uppercase text-muted">[{m.kind}]</div>
                 )}
                 {m.kind === "template" && <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">Template</div>}
-                {(!m.media_id || (m.body && m.body !== m.media_name)) && (
-                  <div className="whitespace-pre-wrap break-words">{m.body || (m.media_id || m.kind === "text" ? "" : "(no text)")}</div>
+                {(!m.media_id || (m.body && m.body !== m.media_name)) ? (
+                  <div className="whitespace-pre-wrap break-words">
+                    {m.body ? linkify(m.body) : m.media_id || m.kind === "text" ? "" : "(no text)"}
+                    {/* the time sits at the end of the last line, like a phone chat app */}
+                    <span className="relative top-[5px] float-right ml-3 inline-flex items-center gap-0.5 whitespace-nowrap text-[11px] leading-none text-[#667781]">
+                      {fmtTime(m.created_at)}
+                      {out && <StatusTick m={m} />}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="mt-1 flex items-center justify-end gap-0.5 text-[11px] leading-none text-[#667781]">
+                    {fmtTime(m.created_at)}
+                    {out && <StatusTick m={m} />}
+                  </div>
                 )}
-                <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-muted">
-                  {fmtTime(m.created_at)}
-                  {out && <StatusTick m={m} />}
-                </div>
                 {m.status === "failed" && m.error && <div className="mt-1 text-[11px] text-danger">{m.error}</div>}
               </div>
             </div>
@@ -303,7 +342,7 @@ function OrderEditor({ order, onSaved, onConfirm }) {
   );
 }
 
-function OrdersPanel({ thread, onChanged, onConfirm }) {
+function OrdersPanel({ thread, onChanged, onConfirm, onClose }) {
   const [reading, setReading] = useState(false);
   const [adding, setAdding] = useState(false);
   const { contact, orders } = thread;
@@ -336,8 +375,15 @@ function OrdersPanel({ thread, onChanged, onConfirm }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-3">
-        <div className="font-heading text-sm font-bold">Order details</div>
+      <div className="flex h-[59px] shrink-0 items-center justify-between gap-2 border-b border-line bg-[#F0F2F5] px-3">
+        <div className="flex items-center gap-2">
+          {onClose && (
+            <button type="button" onClick={onClose} className="rounded-full p-1.5 text-muted hover:bg-black/5" aria-label="Close order details" data-testid="orders-close">
+              <X size={18} />
+            </button>
+          )}
+          <div className="text-[15px] font-medium text-ink">Order details</div>
+        </div>
         <div className="flex gap-1">
           <Button size="sm" variant="ghost" onClick={readAgain} disabled={reading} title="Read the chat again" data-testid="orders-read-again-btn">
             {reading ? <Spinner /> : <ArrowsClockwise size={14} />} Read chat
@@ -379,7 +425,7 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
     return () => URL.revokeObjectURL(url);
   }, [file]);
   const [sending, setSending] = useState(false);
-  const [showOrders, setShowOrders] = useState(false);
+  const [panel, setPanel] = useState(null); // null (orders on wide screens) | "orders" | "info"
   const [tplFor, setTplFor] = useState(null); // { order, confirmation } while the template dialog is open
 
   const load = useCallback(async () => {
@@ -454,56 +500,66 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
   };
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="relative flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-3 border-b border-line bg-white px-3 py-2.5">
-          <button className="rounded-lg p-1.5 hover:bg-sand lg:hidden" onClick={onBack} aria-label="Back to chats" data-testid="chat-back-btn">
-            <ArrowLeft size={18} />
+        <div className="flex h-[59px] shrink-0 items-center gap-2 border-b border-line bg-[#F0F2F5] px-3">
+          <button className="rounded-full p-1.5 text-[#54656F] hover:bg-black/5 lg:hidden" onClick={onBack} aria-label="Back to chats" data-testid="chat-back-btn">
+            <ArrowLeft size={20} />
           </button>
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-heading text-sm font-bold">{contact.name || fmtPhone(contact.customer_phone)}</div>
-            <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-muted">
-              <span className="font-mono">{fmtPhone(contact.customer_phone)}</span>
-              <span>· via {contact.number_label}</span>
-              {number.bot_mode && (
-                <span>
-                  · bot: {number.bot_mode === "read" ? "reads & saves orders" : number.bot_mode === "ask" ? "asks questions" : "off"}
-                </span>
-              )}
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+            onClick={() => setPanel((p) => (p === "info" ? null : "info"))}
+            title="Contact info"
+            data-testid="chat-header-profile"
+          >
+            <Avatar name={contact.name} phone={contact.customer_phone} size={40} />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[16px] text-[#111b21]">{contact.name || fmtPhone(contact.customer_phone)}</div>
+              <div className="truncate text-[12.5px] text-[#667781]">
+                {contact.name ? `${fmtPhone(contact.customer_phone)} · ` : ""}via {contact.number_label}
+                {number.bot_mode && ` · bot: ${number.bot_mode === "read" ? "reads & saves orders" : number.bot_mode === "ask" ? "asks questions" : "off"}`}
+                <span className="hidden md:inline"> · click for contact info</span>
+              </div>
             </div>
-          </div>
-          <Badge variant={contact.window_open ? "default" : "neutral"} className="hidden sm:inline-flex" data-testid="reply-window-badge">
+          </button>
+          <Badge
+            variant={contact.window_open ? "default" : "neutral"}
+            className={cn("hidden shrink-0", panel === "info" ? "2xl:inline-flex" : "sm:inline-flex")}
+            data-testid="reply-window-badge"
+          >
             <Clock size={11} /> {contact.window_open ? `Reply window ${left >= 1 ? `${Math.floor(left)}h` : `${Math.ceil(left * 60)}m`} left` : "Reply window closed"}
           </Badge>
-          <Button size="sm" variant="outline" className="xl:hidden" onClick={() => setShowOrders((v) => !v)} data-testid="toggle-orders-btn">
-            <Package size={14} /> {thread.orders.length}
-          </Button>
-          <ConfirmDialog
-            testId="delete-chat"
-            title="Delete this chat permanently?"
-            description={`All ${messages.length} message${messages.length === 1 ? "" : "s"}, photos and files with ${
-              contact.name || fmtPhone(contact.customer_phone)
-            } will be removed from Charm.Studio and the database for everyone on the team. Deleted chats cannot be recovered. Saved orders are kept, and the customer's own WhatsApp is not affected. If they message again, a new chat starts.`}
-            confirmLabel="Delete forever"
-            onConfirm={removeChat}
-            trigger={
-              <button
-                className="rounded-lg p-1.5 text-muted hover:bg-red-50 hover:text-red-600"
-                aria-label="Delete chat"
-                title="Delete chat"
-                data-testid="delete-chat-btn"
-              >
-                <Trash size={18} />
-              </button>
-            }
-          />
+          <button
+            type="button"
+            className={cn("relative rounded-full p-2 text-[#54656F] hover:bg-black/5", panel === "orders" && "bg-black/5")}
+            onClick={() => setPanel((p) => (p === "orders" ? null : "orders"))}
+            title="Order details"
+            aria-label="Order details"
+            data-testid="toggle-orders-btn"
+          >
+            <Package size={21} />
+            {thread.orders.length > 0 && (
+              <span className="absolute right-0.5 top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-forest px-1 text-[9px] font-bold text-white">{thread.orders.length}</span>
+            )}
+          </button>
+          <button
+            type="button"
+            className={cn("rounded-full p-2 text-[#54656F] hover:bg-black/5", panel === "info" && "bg-black/5")}
+            onClick={() => setPanel((p) => (p === "info" ? null : "info"))}
+            title="Contact info"
+            aria-label="Contact info"
+            data-testid="contact-info-btn"
+          >
+            <Info size={21} />
+          </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto bg-[#EFEAE1]">
+        <div className="chat-wallpaper min-h-0 flex-1 overflow-y-auto">
           <MessageList messages={messages} namePrefix={thread.orders[0]?.order_id || ""} />
         </div>
 
-        <form onSubmit={send} className="border-t border-line bg-white p-3" data-testid="reply-form">
+        <form onSubmit={send} className="bg-[#F0F2F5] px-3 py-2.5" data-testid="reply-form">
           {!number.can_send ? (
             <p className="text-xs text-muted">This number is paused or not set up for sending. Check Settings → WhatsApp numbers.</p>
           ) : lateReply ? (
@@ -558,9 +614,9 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
               data-testid="attach-input"
             />
             {canReply && !lateReply && (
-              <Button type="button" variant="outline" onClick={() => fileInput.current?.click()} title="Attach a photo or file" aria-label="Attach a photo or file" data-testid="attach-btn">
-                <Paperclip size={16} />
-              </Button>
+              <button type="button" className="mb-1 rounded-full p-2 text-[#54656F] hover:bg-black/5" onClick={() => fileInput.current?.click()} title="Attach a photo or file" aria-label="Attach a photo or file" data-testid="attach-btn">
+                <Paperclip size={22} />
+              </button>
             )}
             <Textarea
               data-testid="reply-input"
@@ -590,30 +646,58 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
                   send();
                 }
               }}
-              className="max-h-40 min-h-[42px] resize-none"
+              className="max-h-40 min-h-[42px] resize-none rounded-lg border-0 bg-white px-3 py-2.5 text-[15px] shadow-none focus-visible:ring-1"
             />
             {canReply && (
-              <Button
+              <button
                 type="button"
-                variant="outline"
+                className="mb-1 rounded-full p-2 text-[#54656F] hover:bg-black/5"
                 onClick={() => setTplFor({ order: null, confirmation: false })}
                 title="Send a template"
                 aria-label="Send a template"
                 data-testid="template-btn"
               >
-                <FileText size={16} />
-              </Button>
+                <FileText size={22} />
+              </button>
             )}
-            <Button type="submit" disabled={!canReply || sending || (!text.trim() && !file)} data-testid="reply-send-btn" aria-label="Send">
-              {sending ? <Spinner /> : <PaperPlaneRight size={16} weight="fill" />}
-            </Button>
+            <button
+              type="submit"
+              disabled={!canReply || sending || (!text.trim() && !file)}
+              className="grid h-[42px] w-[42px] shrink-0 place-items-center rounded-full bg-forest text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              data-testid="reply-send-btn"
+              aria-label="Send"
+            >
+              {sending ? <Spinner /> : <PaperPlaneRight size={20} weight="fill" />}
+            </button>
           </div>
         </form>
       </div>
 
       {/* Orders: side panel on wide screens, toggle on smaller ones */}
-      <aside className={cn("w-80 shrink-0 border-l border-line bg-cream/60", showOrders ? "block" : "hidden xl:block")}>
-        <OrdersPanel thread={thread} onChanged={load} onConfirm={(o) => setTplFor({ order: o, confirmation: true })} />
+      {/* Orders or contact info: a side panel on wide screens, sliding over the chat on smaller ones */}
+      <aside
+        className={cn(
+          "absolute inset-y-0 right-0 z-20 w-full shrink-0 border-l border-line bg-cream sm:w-96 xl:static xl:z-auto",
+          panel === "info" ? "xl:w-[400px]" : "xl:w-80",
+          panel ? "block" : "hidden xl:block"
+        )}
+      >
+        {panel === "info" ? (
+          <ContactInfo
+            thread={thread}
+            onClose={() => setPanel(null)}
+            onShowOrders={() => setPanel("orders")}
+            onTemplate={() => setTplFor({ order: null, confirmation: false })}
+            onDelete={removeChat}
+          />
+        ) : (
+          <OrdersPanel
+            thread={thread}
+            onChanged={load}
+            onConfirm={(o) => setTplFor({ order: o, confirmation: true })}
+            onClose={panel === "orders" ? () => setPanel(null) : null}
+          />
+        )}
       </aside>
 
       <TemplateDialog

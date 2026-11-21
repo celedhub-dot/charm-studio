@@ -60,7 +60,7 @@ function useMediaUrl(id, auto) {
 }
 
 const fmtSize = (n) => (n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
-export { fmtSize };
+export { fmtSize, useMediaUrl };
 
 function Failed({ error, onRetry }) {
   return (

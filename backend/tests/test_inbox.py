@@ -216,6 +216,10 @@ try:
         check(bad.status_code == 400, "period over 3 months refused")
         check(c.get("/api/orders/sheet.pdf", params=params).status_code == 401, "sheet needs login")
 
+        print("Contact info stats")
+        st = c.get("/api/inbox/conversations/Main Shop/919876543210", headers=H(tok)).json()["stats"]
+        check(st["messages"] >= 2 and st["from_customer"] >= 1 and st["first_message_at"] and st["photos"] == 0, "chat stats for the contact panel", st)
+
         print("Delete a chat")
         before = len(c.get("/api/inbox/conversations", headers=H(tok)).json())
         check(c.delete("/api/inbox/conversations/Main Shop/919876543210").status_code == 401, "delete needs login")

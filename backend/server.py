@@ -2912,8 +2912,17 @@ async def _thread(label: str, phone: str) -> Dict[str, Any]:
     orders = await db().fetch(
         f"SELECT {ORDER_SELECT} FROM orders WHERE customer_phone = $1 ORDER BY created_at DESC LIMIT 50", phone
     )
+    stats = await db().fetchrow(
+        """SELECT min(created_at) AS first_message_at, count(*) AS messages,
+                  count(*) FILTER (WHERE direction = 'in') AS from_customer,
+                  count(*) FILTER (WHERE media_id <> '' AND (media_mime LIKE 'image/%' OR media_mime LIKE 'video/%')) AS photos,
+                  count(*) FILTER (WHERE media_id <> '' AND NOT (media_mime LIKE 'image/%' OR media_mime LIKE 'video/%')) AS files
+           FROM wa_messages WHERE number_label = $1 AND customer_phone = $2""",
+        label, phone,
+    )
     cfg = next((c for c in WA_ALL if c["logical_id"] == label), None)
     return {
+        "stats": row_dict(stats),
         "contact": conversation_public(contact),
         "messages": [row_dict(m) for m in messages],
         "orders": [row_dict(o) for o in orders],
