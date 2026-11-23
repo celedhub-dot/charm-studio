@@ -1522,15 +1522,22 @@ def detect_ids(text: str) -> List[str]:
 
 
 def match_orders(detected: List[str], orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    exact, fuzzy, seen = [], [], set()
-    for did in detected:
-        nd = norm_id(did)
-        for o in orders:
-            if o["id"] in seen or not ids_match(did, o.get("order_id", "")):
-                continue
-            seen.add(o["id"])
-            (exact if norm_id(o.get("order_id", "")) == nd else fuzzy).append(o)
-    return exact + fuzzy
+    # Keep every digit and the sub-order boundary; accept the two printed separators.
+    def key(value: str) -> str:
+        return value.strip().upper().replace("-", "_")
+
+    keys = {key(value) for value in detected if value.strip()}
+    return [order for order in orders if key(order.get("order_id") or "") in keys]
+
+
+def label_status(detected, matches):
+    if not detected:
+        return "no_id"
+    if not matches:
+        return "not_found"
+    if len(matches) != 1 or len({v.upper().replace("-", "_") for v in detected}) != 1:
+        return "needs_review"
+    return "matched"
 
 
 def open_pdf(data: bytes) -> fitz.Document:
@@ -1551,7 +1558,7 @@ async def pdf_analyze(file: UploadFile = File(...), model: str = Form(""), effor
     doc = open_pdf(data)
     orders = await load_all_orders()
     pages = []
-    summary = {"total_pages": doc.page_count, "matched": 0, "not_found": 0, "no_id": 0}
+    summary = {"total_pages": doc.page_count, "matched": 0, "not_found": 0, "no_id": 0, "needs_review": 0}
     try:
         for i, page in enumerate(doc):
             text = page.get_text()
@@ -1571,7 +1578,7 @@ async def pdf_analyze(file: UploadFile = File(...), model: str = Form(""), effor
                     raise HTTPException(502, f"AI could not read label page {i + 1}. Try again or use standard matching.") from exc
                 detected = detect_ids(answer)
             matches = match_orders(detected, orders) if detected else []
-            status = "matched" if matches else ("not_found" if detected else "no_id")
+            status = label_status(detected, matches)
             label_date = detect_label_date(text)
             summary[status] += 1
             pix = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5))
@@ -1913,7 +1920,6 @@ async def pdf_annotate(
     doc = open_pdf(data)
     orders = await load_all_orders()
     by_uuid = {o["id"]: o for o in orders}
-    by_order_id = {norm_id(o.get("order_id", "")): o for o in reversed(orders) if o.get("order_id")}
 
     matched = not_found = dates_saved = 0
     stamps: List[Optional[tuple]] = []
@@ -1925,10 +1931,13 @@ async def pdf_annotate(
             order = None
             if pno in override_map:
                 ov = override_map[pno]
-                order = by_uuid.get(ov) or by_order_id.get(norm_id(ov))
+                order = by_uuid.get(ov)
+                if order is None:
+                    choices = match_orders([ov], orders)
+                    order = choices[0] if len(choices) == 1 else None
             if pno not in override_map and order is None and detected:
                 found = match_orders(detected, orders)
-                order = found[0] if found else None
+                order = found[0] if label_status(detected, found) == "matched" else None
 
             if order:
                 matched += 1
@@ -2457,6 +2466,36 @@ DO UPDATE SET step = EXCLUDED.step, fields = EXCLUDED.fields, updated_at = now()
 """
 
 
+async def fill_late_details(label, customer, fields, *, corrections=()):
+    """Fill blanks on a uniquely identified order; without an ID conflicting details need clarification."""
+    oid = (fields.get("order_id") or "").strip()
+    columns = ("product_name", "charm", "colour", "quantity", "notes", "order_date")
+    supplied = {k: fields[k] for k in columns if fields.get(k)}
+    if not supplied:
+        return None
+    if "order_date" in supplied:
+        supplied["order_date"] = parse_order_date(supplied["order_date"])
+        if not supplied["order_date"]:
+            del supplied["order_date"]
+    async with db().acquire() as conn, conn.transaction():
+        rows = await conn.fetch(
+            f"SELECT {ORDER_SELECT} FROM orders WHERE channel=$1 AND customer_phone=$2 "
+            "AND ($3='' OR upper(replace(trim(order_id),'-','_'))=upper(replace($3,'-','_'))) "
+            "ORDER BY id LIMIT 2 FOR UPDATE", label, customer, oid)
+        if len(rows) != 1:
+            return None
+        order = rows[0]
+        if not oid and any(order[k] and str(order[k]).strip().casefold() != str(v).strip().casefold()
+                           for k,v in supplied.items()):
+            return None
+        changes = {k: v for k, v in supplied.items() if not order[k] or (oid and k in corrections and order[k] != v)}
+        if not changes:
+            return order if oid else None
+        assignments = ", ".join(f"{k}=${i}" for i,k in enumerate(changes,2))
+        return await conn.fetchrow(f"UPDATE orders SET {assignments} WHERE id=$1 RETURNING {ORDER_SELECT}",
+                                   order["id"], *changes.values())
+
+
 async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     biz = cfg["logical_id"]
     conv = await db().fetchrow(
@@ -2532,6 +2571,16 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
                 break  # a sentence or question isn't a name/charm: ask again instead of saving it
             else:
                 fields[current] = line
+
+    if (ids or not re.search(r"\b(?:new|another|second)\s+order\b", cleaned, re.I)) and (
+            not conv or fields.get("order_id") or not any((conv["fields"] or {}).get(k) for k in DETAIL_KEYS)):
+        updated = await fill_late_details(biz, customer, fields, corrections=(understood or labelled) if ids else ())
+        if updated:
+            if conv:
+                await db().execute("DELETE FROM wa_conversations WHERE business_number_id=$1 AND customer_phone=$2",
+                                   biz, customer)
+            await send_wa(cfg, customer, f"Thank you! Your details for order {updated['order_id']} have been updated.")
+            return
 
     step = next_step(fields)
     if step >= len(STEP_KEYS) or (FEWER_FOLLOWUPS and STEP_KEYS[step] == "notes"):
@@ -2658,6 +2707,10 @@ async def read_order_details(label: str, customer: str) -> Dict[str, Any]:
     for oid in detect_ids(transcript):  # catch IDs the AI missed (or when no AI is configured)
         if not any(r.get("order_id") and ids_match(oid, r["order_id"]) for r in found):
             found.append({"order_id": oid, "product_name": "", "colour": "", "charm": "", "quantity": "", "notes": ""})
+    if len(found) == 1 and not found[0].get("order_id") and not re.search(r"\b(?:new|another|second)\s+order\b", rows[-1]["body"], re.I):
+        updated = await fill_late_details(label, customer, found[0])
+        if updated:
+            found[0]["order_id"] = updated["order_id"]
     saved = [o for o in [await save_extracted_order(label, customer, r) for r in found] if o]
     if used_ai and rows:
         await db().execute(
@@ -3343,9 +3396,12 @@ async def _thread(label: str, phone: str) -> Dict[str, Any]:
 
 
 @api.get("/customer-data")
-async def customer_data(phone: str = "", order_id: str = "", missing: str = "",
+async def customer_data(phone: str = "", order_id: str = "", missing: str = "", having: str = "",
                         since: Optional[datetime] = None, until: Optional[datetime] = None,
                         offset: int = Query(0, ge=0)):
+    required = [k for k in having.split(",") if k]
+    if set(required) - {"order_id", "product_name", "charm", "colour", "quantity", "notes"}:
+        raise HTTPException(400, "Unknown detail filter")
     rows = await db().fetch("""
         WITH data AS (
             SELECT channel AS label, customer_phone AS phone, created_at AS at, id AS key,
@@ -3373,8 +3429,10 @@ async def customer_data(phone: str = "", order_id: str = "", missing: str = "",
                coalesce(details->>'product_name','')='' OR coalesce(details->>'charm','')=''))
                OR ($3 IN ('order_id','product_name','charm','colour','quantity','notes') AND coalesce(details->>$3,'')=''))
           AND ($4::timestamptz IS NULL OR at >= $4) AND ($5::timestamptz IS NULL OR at <= $5)
+          AND NOT EXISTS (SELECT 1 FROM unnest($7::text[]) AS h(field)
+                          WHERE nullif(trim(details->>h.field),'') IS NULL)
         ORDER BY at DESC,label,phone,key LIMIT 51 OFFSET $6
-    """, phone.strip(), order_id.strip(), missing, since, until, offset)
+    """, phone.strip(), order_id.strip(), missing, since, until, offset, required)
     return {"rows": [row_dict(r) for r in rows[:50]], "more": len(rows) > 50}
 
 

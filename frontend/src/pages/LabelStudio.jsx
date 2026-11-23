@@ -39,6 +39,7 @@ export const POSITIONS = [
 const STATUS = {
   matched: { label: "Matched", variant: "default", icon: CheckCircle },
   manual: { label: "Matched (manual)", variant: "accent", icon: HandPointing },
+  needs_review: { label: "Needs review", variant: "danger", icon: WarningCircle },
   not_found: { label: "Not found", variant: "danger", icon: WarningCircle },
   no_id: { label: "No ID", variant: "neutral", icon: MinusCircle },
 };
@@ -238,7 +239,7 @@ export default function LabelStudio() {
   const pageStatus = (p) => (overrides[p.page] ? "manual" : p.status);
 
   const counts = useMemo(() => {
-    const c = { matched: 0, not_found: 0, no_id: 0 };
+    const c = { matched: 0, not_found: 0, needs_review: 0, no_id: 0 };
     analysis?.pages.forEach((p) => {
       const s = pageStatus(p);
       c[s === "manual" ? "matched" : s] += 1;
@@ -253,7 +254,7 @@ export default function LabelStudio() {
       const ov = Object.fromEntries(Object.entries(overrides).map(([pg, o]) => [pg, o.id]));
       if (model) {
         for (const page of analysis.pages) {
-          ov[page.page] ??= page.matches[0]?.id || "__unmatched__";
+          ov[page.page] ??= page.status === "matched" ? page.matches[0].id : "__unmatched__";
         }
       }
       const res = await annotatePdf(file, { position, skipUnmatched, fontSize, overrides: ov });
@@ -390,6 +391,7 @@ export default function LabelStudio() {
             <span className="mr-1 font-medium text-ink">{analysis.filename}</span>
             <Badge variant="default" data-testid="summary-matched">{counts.matched} matched</Badge>
             <Badge variant="danger" data-testid="summary-not-found">{counts.not_found} not found</Badge>
+            {counts.needs_review > 0 && <Badge variant="danger">{counts.needs_review} need review</Badge>}
             <Badge variant="neutral" data-testid="summary-no-id">{counts.no_id} no ID</Badge>
             {Object.keys(overrides).length > 0 && <Badge variant="accent">{Object.keys(overrides).length} manual</Badge>}
           </div>
@@ -401,7 +403,7 @@ export default function LabelStudio() {
               {analysis.pages.map((p) => {
                 const st = pageStatus(p);
                 const meta = STATUS[st];
-                const order = overrides[p.page] || p.matches[0];
+                const order = overrides[p.page] || (p.status === "matched" ? p.matches[0] : null);
                 return (
                   <button
                     key={p.page}
@@ -439,9 +441,7 @@ export default function LabelStudio() {
                             {order.quantity && order.quantity !== "1" && <span className="text-muted"> · Qty {order.quantity}</span>}
                           </div>
                           <div className="truncate"><span className="text-muted">Notes:</span> {order.notes || "—"}</div>
-                          {p.matches.length > 1 && !overrides[p.page] && (
-                            <div className="mt-1 text-xs text-terracotta-700">{p.matches.length} possible matches · first is used</div>
-                          )}
+
                         </div>
                       ) : (
                         <div className="mt-auto text-xs font-medium text-terracotta-700 group-hover:underline">Click to pick or create an order</div>

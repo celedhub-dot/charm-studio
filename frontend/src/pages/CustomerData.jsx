@@ -4,7 +4,7 @@ import { api, errorMessage } from "../lib/api";
 import { PageHeader } from "../components/common";
 
 const fields = { order_id: "Order ID", product_name: "Engraving name", charm: "Charm", colour: "Colour", quantity: "Quantity", notes: "Notes" };
-const initial = { phone: "", order_id: "", missing: "", since: "", until: "" };
+const initial = { phone: "", order_id: "", missing: "", having: [], since: "", until: "" };
 
 export default function CustomerData() {
   const [filters, setFilters] = useState(initial);
@@ -19,20 +19,27 @@ export default function CustomerData() {
     const controller = new AbortController();
     setResult(null);
     setError("");
-    const timer = setTimeout(async () => {
-      const params = { offset, ...filters };
+    let active = false;
+    const load = async () => {
+      if (active) return;
+      active = true;
+      const params = { offset, ...filters, having: filters.having.join(",") };
       for (const key of ["since", "until"]) {
         if (params[key]) params[key] = new Date(new Date(params[key]).getTime() + (key === "until" ? 59999 : 0)).toISOString();
         else delete params[key];
       }
       try {
         const response = await api.get("/customer-data", { params, signal: controller.signal });
-        if (!controller.signal.aborted) setResult(response.data);
+        if (!controller.signal.aborted) { setResult(response.data); setError(""); }
       } catch (e) {
         if (!controller.signal.aborted) setError(errorMessage(e));
+      } finally {
+        active = false;
       }
-    }, 200);
-    return () => { clearTimeout(timer); controller.abort(); };
+    };
+    const timer = setTimeout(load, 200);
+    const refresh = setInterval(load, 30000);
+    return () => { clearTimeout(timer); clearInterval(refresh); controller.abort(); };
   }, [filters, offset]);
   const inputClass = "block mt-1 w-full rounded-lg border border-line bg-white p-2";
   return <main>
@@ -44,6 +51,14 @@ export default function CustomerData() {
         <option value="">All records</option><option value="any">Any required detail</option>
         {Object.entries(fields).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
       </select></label>
+      <fieldset className="sm:col-span-2 lg:col-span-5">
+        <legend className="mb-2 font-medium">Having details (all selected)</legend>
+        <div className="flex flex-wrap gap-4">{Object.entries(fields).map(([key, label]) =>
+          <label key={key} className="flex items-center gap-2"><input type="checkbox"
+            checked={filters.having.includes(key)}
+            onChange={e => change("having", e.target.checked ? [...filters.having, key] : filters.having.filter(k => k !== key))} />
+            {label}</label>)}</div>
+      </fieldset>
     </div>
     {error ? <p role="alert">{error}</p> : !result ? <p>Loading customer data…</p> : <>
       <div className="overflow-x-auto rounded-xl border border-line bg-white">

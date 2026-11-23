@@ -27,10 +27,30 @@ saved = []
 
 
 class FakeDB:
+    def acquire(self):
+        return self
+
+    def transaction(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
     async def fetch(self, q, *a):  # recent chat for context: the shop's greeting, if a test sets one
+        if "FROM orders" in q:
+            return [o for o in saved if o["channel"] == a[0] and o["customer_phone"] == a[1]
+                    and (not a[2] or o["order_id"] == a[2])][:2]
         return state.get("history", [])
 
     async def fetchrow(self, q, *a):
+        if q.startswith("UPDATE orders SET"):
+            row = next(o for o in saved if o["id"] == a[0])
+            for assignment, value in zip(q.split(" SET ")[1].split(" WHERE ")[0].split(", "), a[1:]):
+                row[assignment.split("=")[0]] = value
+            return row
         return {"step": 0, "fields": state.get("fields", {})} if "FROM wa_conversations" in q and "fields" in state else None
 
     async def execute(self, q, *a):
@@ -50,6 +70,7 @@ async def fake_send(cfg, to, text, source="bot"):
 
 
 async def fake_insert(data):
+    data["id"] = str(len(saved) + 1)
     saved.append(data)
     return {k: data.get(k, "") for k in ("order_id", "product_name", "charm", "notes", "colour", "quantity")}
 
@@ -188,3 +209,14 @@ async def test_guide():
 
 asyncio.run(test_guide())
 print("ALL OK (combined prompts, optional notes and captioned Order ID guide)")
+
+async def check_late_details():
+    _, _, orders = await run(["order 123456789012_1 name Meera, star charm", "notes: gift wrap"])
+    assert len(orders) == 1 and orders[0]["notes"] == "gift wrap", orders
+    saved.append({**saved[0], "id": "2", "order_id": "999999999999_1", "notes": ""})
+    assert await server.fill_late_details("Order desk", "918429172126", {"colour": "red"}) is None
+    row = await server.fill_late_details("Order desk", "918429172126", {"order_id":"999999999999_1","colour":"red"})
+    assert row["colour"] == "red" and not saved[0]["colour"]
+
+asyncio.run(check_late_details())
+print("ALL OK (late details and multiple orders)")
