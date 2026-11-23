@@ -167,3 +167,5 @@ ALTER TABLE wa_contacts ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS pending_details jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS details_read_at timestamptz;
+
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS reply_language text NOT NULL DEFAULT '';

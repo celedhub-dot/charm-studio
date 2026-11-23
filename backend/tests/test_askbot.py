@@ -146,6 +146,9 @@ async def fake_claude(system, user, max_tokens=0, effort=None, model=None):
     return _json.dumps(r)
 
 
+from unittest.mock import AsyncMock
+real_chat_language = server.chat_language
+server.chat_language = AsyncMock(return_value="")
 server.ai_ready = lambda: True
 server.claude_text = fake_claude
 replies[:] = [
@@ -220,3 +223,19 @@ async def check_late_details():
 
 asyncio.run(check_late_details())
 print("ALL OK (late details and multiple orders)")
+
+async def check_language():
+    db = AsyncMock()
+    db.fetch.return_value = [{"body":"Hi"}, {"body":"Mujhe order karna hai"}]
+    db.fetchval.side_effect = ["", "Roman Hinglish", "Roman Hinglish"]
+    model = AsyncMock(side_effect=['{"language":"Roman Hinglish"}', "Order {order_id} save ho gaya."])
+    with patch.object(server, "db", return_value=db), patch.object(server, "ai_ready", return_value=True), patch.object(server, "claude_text", model):
+        assert await real_chat_language("desk", "customer", "Mujhe order karna hai") == "Roman Hinglish"
+        assert await real_chat_language("desk", "customer", "Thank you") == "Roman Hinglish"
+        text = await server.localize_reply("Order {order_id} saved.", "Roman Hinglish")
+        assert server.fill_template(text, {"order_id":"OD123"}) == "Order OD123 save ho gaya."
+        assert await server.localize_reply("Order {order_id} saved.", "Roman Hinglish") == text
+        assert model.await_count == 2
+
+asyncio.run(check_language())
+print("ALL OK (opening language persistence and localized reply templates)")
