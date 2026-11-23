@@ -15,6 +15,7 @@ import {
 import {
   analyzePdf,
   annotatePdf,
+  getExtractOptions,
   getOrders,
   createOrder,
   downloadBlob,
@@ -185,6 +186,10 @@ function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onC
 }
 
 export default function LabelStudio() {
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("medium");
+  const [options, setOptions] = useState(null);
+  useEffect(() => { getExtractOptions().then(setOptions).catch(() => {}); }, []);
   const [file, setFile] = useState(null);
   const [drag, setDrag] = useState(false);
   const [analysis, setAnalysis] = useState(null);
@@ -218,7 +223,7 @@ export default function LabelStudio() {
     setOverrides({});
     setAnalyzing(true);
     try {
-      const [res, all] = await Promise.all([analyzePdf(f), getOrders()]);
+      const [res, all] = await Promise.all([analyzePdf(f, model, effort), getOrders()]);
       setAnalysis(res);
       setOrders(all);
       toast.success(`Analysed ${res.summary.total_pages} pages`);
@@ -246,6 +251,11 @@ export default function LabelStudio() {
     setGenerating(true);
     try {
       const ov = Object.fromEntries(Object.entries(overrides).map(([pg, o]) => [pg, o.id]));
+      if (model) {
+        for (const page of analysis.pages) {
+          ov[page.page] ??= page.matches[0]?.id || "__unmatched__";
+        }
+      }
       const res = await annotatePdf(file, { position, skipUnmatched, fontSize, overrides: ov });
       const name = filenameFromDisposition(res.headers["content-disposition"], `annotated_${file.name}`);
       downloadBlob(res.data, name);
@@ -287,6 +297,15 @@ export default function LabelStudio() {
           )
         }
       />
+      {!file && <div className="mb-5 flex flex-wrap gap-4 rounded-xl border border-line bg-white p-4">
+        <label>Label reader <select className="ml-2 rounded border p-2" value={model} onChange={e => setModel(e.target.value)}>
+          <option value="">Standard order matching (no AI charge)</option>
+          {options?.models?.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+        </select></label>
+        {model && <label>Effort <select className="ml-2 rounded border p-2" value={effort} onChange={e => setEffort(e.target.value)}>
+          {options.efforts.map(e => <option key={e}>{e}</option>)}
+        </select></label>}
+      </div>}
 
       {!analysis && (
         <div

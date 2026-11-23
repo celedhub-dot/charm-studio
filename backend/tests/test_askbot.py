@@ -15,7 +15,11 @@ BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 load_dotenv(BACKEND / ".env")
 os.environ["ANTHROPIC_API_KEY"] = ""
+os.environ["BOT_FEWER_FOLLOWUPS"] = "false"
 import server  # noqa: E402
+
+actual_guide = server.ORDER_ID_GUIDE
+server.ORDER_ID_GUIDE = BACKEND / "unavailable-guide-for-test"
 
 state = {}
 sent = []
@@ -158,3 +162,29 @@ s, f, _ = asyncio.run(run(["Hi", "OD432198765432109876", "can you build the pyth
 assert f == {"order_id": "OD432198765432109876"}, f
 print("  without AI: sentences and questions aren't saved as the name")
 print("ALL OK (on topic)")
+
+server.FEWER_FOLLOWUPS = True
+s, f, done = asyncio.run(run(["Hi", "order 123456789012_1 name Meera, star charm"]))
+assert s[0] == server.missing_questions({}) and len(s) == 2
+assert done[0]["product_name"] == "Meera" and not done[0]["notes"]
+
+from unittest.mock import AsyncMock, patch
+
+async def test_guide():
+    with patch.object(server, "ORDER_ID_GUIDE", actual_guide), patch.object(
+        server, "wa_upload", AsyncMock(return_value="test-media")
+    ), patch.object(server, "_cache_media"), patch.object(
+        server, "send_payload", AsyncMock(return_value=server.httpx.Response(200))
+    ) as photo:
+        messages, _, orders = await run(["name Riya, charm star", "where is my ID?", "123456789012_1"])
+        assert photo.await_count == 1 and photo.await_args.kwargs["text"] == server.bot_question(0)
+        assert orders[0]["product_name"] == "Riya" and orders[0]["order_id"] == "123456789012_1"
+        assert messages[0] == server.bot_question(0)
+        for first in ("Hi", "order 123456789012_1 name Meera, star charm", "123456789012_1"):
+            photo.reset_mock()
+            messages, _, _ = await run([first])
+            assert photo.await_count == 1 and not messages
+        assert actual_guide.read_bytes()[:3] == bytes.fromhex("ffd8ff")
+
+asyncio.run(test_guide())
+print("ALL OK (combined prompts, optional notes and captioned Order ID guide)")

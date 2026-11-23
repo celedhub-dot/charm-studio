@@ -115,9 +115,11 @@ export const extractFile = (file, ai = {}) => {
 };
 
 // PDF
-export const analyzePdf = (file) => {
+export const analyzePdf = (file, model = "", effort = "medium") => {
   const fd = new FormData();
   fd.append("file", file);
+  fd.append("model", model);
+  fd.append("effort", effort);
   return api.post("/pdf/analyze", fd).then((r) => r.data);
 };
 export const annotatePdf = (file, { position, skipUnmatched, fontSize, overrides }) => {

@@ -8,6 +8,7 @@ import { getUnread } from "../lib/api";
 export const NAV = [
   { to: "/", label: "Dashboard", icon: SquaresFour, id: "dashboard" },
   { to: "/chats", label: "Chats", icon: ChatCenteredText, id: "chats", badge: "unread" },
+  { to: "/customer-data", label: "Customer Data", icon: ChatsCircle, id: "customer-data" },
   { to: "/orders", label: "Orders", icon: Package, id: "orders" },
   { to: "/extract", label: "WhatsApp Extract", icon: ChatsCircle, id: "extract" },
   { to: "/labels", label: "Label Studio", icon: Tag, id: "labels" },

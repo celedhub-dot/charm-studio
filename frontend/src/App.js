@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-route
 import { Toaster } from "sonner";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
+import CustomerData from "./pages/CustomerData";
 import Orders from "./pages/Orders";
 import WhatsAppExtract from "./pages/WhatsAppExtract";
 import LabelStudio from "./pages/LabelStudio";
@@ -101,6 +102,7 @@ function AppRoutes() {
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="chats" element={<Chats />} />
+          <Route path="customer-data" element={<CustomerData />} />
           <Route path="orders" element={<Orders />} />
           <Route path="extract" element={<WhatsAppExtract />} />
           <Route path="labels" element={<LabelStudio />} />
