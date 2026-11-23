@@ -12,7 +12,7 @@ export default function AuthShell({ title, subtitle, children, footer }) {
           <h1 className="font-heading text-2xl font-extrabold text-ink">
             {title || (
               <>
-                Charm<span className="text-terracotta">.</span>Studio
+                Custom <span className="text-terracotta">Label</span>
               </>
             )}
           </h1>

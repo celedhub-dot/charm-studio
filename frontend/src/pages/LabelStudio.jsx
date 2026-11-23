@@ -352,7 +352,7 @@ export default function LabelStudio() {
             <CardContent className="grid gap-5 p-5 lg:grid-cols-[1fr_auto] lg:items-end">
               <div className="grid gap-4 sm:grid-cols-3">
                 <div className="space-y-1.5">
-                  <Label title="Meesho, Flipkart and most labels get the box right below the label. The corner is used only for layouts Charm.Studio doesn't recognise.">
+                  <Label title="Meesho, Flipkart and most labels get the box right below the label. The corner is used only for layouts Custom Label doesn't recognise.">
                     Corner (unusual labels only)
                   </Label>
                   <div className="flex items-center gap-3">

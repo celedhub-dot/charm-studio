@@ -179,7 +179,7 @@ export default function ChatMenu({ chat, onChanged, onDeleted, onMarkedUnread })
         onOpenChange={(o) => !o && setConfirm(null)}
         testId="clear-chat"
         title="Clear this chat?"
-        description={`All messages, photos and files with ${who} will be removed from Charm.Studio and the database for everyone on the team. This can't be undone. The chat stays in your list, you can still reply within the 24-hour window, and saved orders are kept. The customer's WhatsApp isn't affected.`}
+        description={`All messages, photos and files with ${who} will be removed from Custom Label and the database for everyone on the team. This can't be undone. The chat stays in your list, you can still reply within the 24-hour window, and saved orders are kept. The customer's WhatsApp isn't affected.`}
         confirmLabel="Clear chat"
         onConfirm={doClear}
       />
@@ -188,7 +188,7 @@ export default function ChatMenu({ chat, onChanged, onDeleted, onMarkedUnread })
         onOpenChange={(o) => !o && setConfirm(null)}
         testId="delete-chat"
         title="Delete this chat permanently?"
-        description={`All messages, photos and files with ${who} will be removed from Charm.Studio and the database for everyone on the team, and the chat disappears from your list. Deleted chats cannot be recovered. Saved orders are kept, and the customer's own WhatsApp is not affected. If they message again, a new chat starts.`}
+        description={`All messages, photos and files with ${who} will be removed from Custom Label and the database for everyone on the team, and the chat disappears from your list. Deleted chats cannot be recovered. Saved orders are kept, and the customer's own WhatsApp is not affected. If they message again, a new chat starts.`}
         confirmLabel="Delete forever"
         onConfirm={doDelete}
       />

@@ -1,4 +1,4 @@
-"""Charm.Studio backend.
+"""Custom Label backend.
 
 FastAPI + asyncpg (Supabase Postgres) + PyMuPDF + Anthropic SDK.
 All routes are mounted under /api.
@@ -6,6 +6,7 @@ All routes are mounted under /api.
 import asyncio
 import base64
 import csv
+from email.utils import parseaddr
 import hashlib
 import hmac
 import html
@@ -118,7 +119,8 @@ AUTH_SECRET = _env_secret("AUTH_SECRET", 32)
 LEGACY_ADMIN_PASSWORD = _env_secret("ADMIN_PASSWORD", 8)  # only used for the very first login
 RESET_PASSWORD = _env_secret("RESET_PASSWORD", 8)  # emergency way back in; remove after use
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
-RESEND_FROM = os.environ.get("RESEND_FROM", "").strip() or "Charm.Studio <onboarding@resend.dev>"
+_reset_sender_address = parseaddr(os.environ.get("RESEND_FROM", "").strip() or "onboarding@resend.dev")[1]
+RESEND_FROM = f"Custom Label <{_reset_sender_address}>"
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
 CORS_ORIGINS = [
     o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()
@@ -315,7 +317,7 @@ async def lifespan(_: FastAPI):
         await import_env_wa_numbers()
     await load_wa_numbers()
     log.info(
-        "Charm.Studio ready. Account set up: %s. WhatsApp numbers: %d saved, %d active.",
+        "Custom Label ready. Account set up: %s. WhatsApp numbers: %d saved, %d active.",
         not needs_setup(),
         len(WA_ALL),
         len(active_numbers()),
@@ -335,7 +337,7 @@ async def lifespan(_: FastAPI):
     await pool.close()
 
 
-app = FastAPI(title="Charm.Studio API", lifespan=lifespan)
+app = FastAPI(title="Custom Label API", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -642,12 +644,12 @@ def frontend_base(request: Request) -> Optional[str]:
 async def send_reset_email(to: str, name: str, link: str) -> bool:
     greeting = f"Hi {html.escape(name)}," if name else "Hi,"
     text = (
-        f"{greeting.replace('&amp;', '&')}\n\nSomeone (hopefully you) asked to reset your Charm.Studio password.\n"
+        f"{greeting.replace('&amp;', '&')}\n\nSomeone (hopefully you) asked to reset your Custom Label password.\n"
         f"Open this link within 30 minutes to choose a new one:\n\n{link}\n\n"
         "If you didn't ask for this, ignore this email. Your password won't change."
     )
     body_html = (
-        f"<p>{greeting}</p><p>Someone (hopefully you) asked to reset your Charm.Studio password.</p>"
+        f"<p>{greeting}</p><p>Someone (hopefully you) asked to reset your Custom Label password.</p>"
         f'<p><a href="{html.escape(link)}" style="background:#2D4A22;color:#fff;padding:10px 16px;'
         'border-radius:8px;text-decoration:none;display:inline-block">Choose a new password</a></p>'
         "<p>The link works for 30 minutes. If you didn't ask for this, ignore this email. "
@@ -658,7 +660,7 @@ async def send_reset_email(to: str, name: str, link: str) -> bool:
             resp = await client.post(
                 "https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-                json={"from": RESEND_FROM, "to": [to], "subject": "Reset your Charm.Studio password", "html": body_html, "text": text},
+                json={"from": RESEND_FROM, "to": [to], "subject": "Reset your Custom Label password", "html": body_html, "text": text},
             )
     except httpx.HTTPError:
         log.exception("Could not reach Resend")
@@ -811,7 +813,7 @@ async def load_all_orders() -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 @public.get("/")
 async def root():
-    return {"app": "Charm.Studio", "ok": True}
+    return {"app": "Custom Label", "ok": True}
 
 
 @public.get("/health")
@@ -1097,7 +1099,7 @@ async def orders_sheet(
     if len(rows) > SHEET_MAX_ROWS:
         raise HTTPException(400, f"That's more than {SHEET_MAX_ROWS} orders. Narrow it down with a date.")
     orders = [row_dict(r) for r in rows]
-    shop = (SETTINGS.get("shop") or {}).get("shop_name") or "Charm.Studio"
+    shop = (SETTINGS.get("shop") or {}).get("shop_name") or "Custom Label"
     parts = [title.strip()[:60]] if title.strip() else []
     if not parts and start:
         parts.append((begin + timedelta(minutes=tz)).strftime("%d %b %Y"))
@@ -1967,7 +1969,7 @@ async def pdf_annotate(
                     stamps.append(None)
                 else:
                     detail = f"ID: {truncate(detected[0], 34)}" if detected else "No order ID detected"
-                    stamps.append(("ORDER NOT FOUND", [detail, "Check the order in Charm.Studio", ""], RED))
+                    stamps.append(("ORDER NOT FOUND", [detail, "Check the order in Custom Label", ""], RED))
         out = build_label_pdf(doc, stamps, position, font_size)
     finally:
         doc.close()
@@ -3195,7 +3197,7 @@ async def meta_check(phone_id: str, token: str) -> Dict[str, Any]:
 
 
 async def d360_set_webhook(api_key: str, url: str) -> None:
-    """Point the 360dialog number's webhook at Charm.Studio. Raises HTTPException(424) on failure."""
+    """Point the 360dialog number's webhook at Custom Label. Raises HTTPException(424) on failure."""
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(f"{D360_BASE}/v1/configs/webhook", json={"url": url}, headers={"D360-API-KEY": api_key})
@@ -3337,9 +3339,9 @@ async def check_wa_number(number_id: str, request: Request):
         raise HTTPException(400, "The saved token can't be read any more. Edit the number and paste it again.")
     if cfg.get("provider") == "360dialog":
         url = number_webhook_url(public_base_url(request), cfg)
-        await d360_set_webhook(cfg["token"], url)  # (re)points the webhook at Charm.Studio
+        await d360_set_webhook(cfg["token"], url)  # (re)points the webhook at Custom Label
         return {"ok": True, "display_phone_number": cfg["display"], "verified_name": "", "quality_rating": "",
-                "message": "360dialog accepted the API key and now sends this number's messages to Charm.Studio."}
+                "message": "360dialog accepted the API key and now sends this number's messages to Custom Label."}
     info = await meta_check(cfg["phone_id"], cfg["token"])
     if not cfg["display"] and info.get("display_phone_number"):
         await db().execute(
@@ -3649,7 +3651,7 @@ def _placeholders(text: str) -> List[str]:
 
 
 def normalize_template(t: Dict[str, Any]) -> Dict[str, Any]:
-    """Reduce a Meta/360dialog template to what Charm.Studio needs, and say whether it can be sent from here."""
+    """Reduce a Meta/360dialog template to what Custom Label needs, and say whether it can be sent from here."""
     comps = [c for c in (t.get("components") or []) if isinstance(c, dict)]
 
     def comp(kind: str) -> Dict[str, Any]:
@@ -3660,7 +3662,7 @@ def normalize_template(t: Dict[str, Any]) -> Dict[str, Any]:
     header_text = str(header.get("text") or "") if header_format == "TEXT" else ""
     problems: List[str] = []
     if header and header_format != "TEXT":
-        problems.append(f"it has a {header_format.lower()} header (only text headers can be sent from Charm.Studio)")
+        problems.append(f"it has a {header_format.lower()} header (only text headers can be sent from Custom Label)")
     button_texts: List[str] = []
     for b in buttons.get("buttons") or []:
         btype = str(b.get("type", "")).upper()
@@ -3769,7 +3771,7 @@ class TemplateSendIn(BaseModel):
     language: str = Field(..., min_length=1, max_length=20)
     header_params: List[str] = Field(default_factory=list, max_length=10)
     body_params: List[str] = Field(default_factory=list, max_length=60)
-    order_id: Optional[str] = None  # Charm.Studio order to mark as confirmed
+    order_id: Optional[str] = None  # Custom Label order to mark as confirmed
 
 
 @api.get("/inbox/templates")
@@ -3790,7 +3792,7 @@ async def inbox_send_template(payload: TemplateSendIn):
     if not tpl:
         raise HTTPException(404, f"Template '{payload.name}' ({payload.language}) wasn't found on {cfg['label']}.")
     if not tpl["sendable"]:
-        raise HTTPException(400, f"'{tpl['name']}' can't be sent from Charm.Studio: {tpl['problem']}.")
+        raise HTTPException(400, f"'{tpl['name']}' can't be sent from Custom Label: {tpl['problem']}.")
     header_vals = [clean_param(v) for v in payload.header_params]
     body_vals = [clean_param(v) for v in payload.body_params]
     if len(header_vals) != len(tpl["header_params"]) or len(body_vals) != len(tpl["body_params"]):

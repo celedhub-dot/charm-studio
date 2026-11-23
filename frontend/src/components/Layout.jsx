@@ -24,7 +24,7 @@ function Logo({ shopName }) {
       </div>
       <div className="min-w-0 leading-tight">
         <div className="font-heading text-lg font-extrabold tracking-tight text-ink">
-          Charm<span className="text-terracotta">.</span>Studio
+          Custom <span className="text-terracotta">Label</span>
         </div>
         {shopName && (
           <div className="truncate text-xs text-muted" data-testid="sidebar-shop-name">

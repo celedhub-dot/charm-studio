@@ -45,7 +45,7 @@ export default function LabelsTab() {
       >
         <div className="grid gap-5 sm:grid-cols-3">
           <div className="space-y-1.5">
-            <Label title="Meesho, Flipkart and most labels get the box right below the label. The corner is used only for layouts Charm.Studio doesn't recognise.">
+            <Label title="Meesho, Flipkart and most labels get the box right below the label. The corner is used only for layouts Custom Label doesn't recognise.">
               Corner (unusual labels only)
             </Label>
             <div className="flex items-center gap-3">

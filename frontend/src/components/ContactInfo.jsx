@@ -285,7 +285,7 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
           title="Delete this chat permanently?"
           description={`All ${stats.messages ?? messages.length} message${(stats.messages ?? messages.length) === 1 ? "" : "s"}, photos and files with ${
             name || fmtPhone(phone)
-          } will be removed from Charm.Studio and the database for everyone on the team. Deleted chats cannot be recovered. Saved orders are kept, and the customer's own WhatsApp is not affected. If they message again, a new chat starts.`}
+          } will be removed from Custom Label and the database for everyone on the team. Deleted chats cannot be recovered. Saved orders are kept, and the customer's own WhatsApp is not affected. If they message again, a new chat starts.`}
           confirmLabel="Delete forever"
           onConfirm={onDelete}
           trigger={

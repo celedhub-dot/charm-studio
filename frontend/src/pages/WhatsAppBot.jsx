@@ -68,7 +68,7 @@ export default function WhatsAppBot() {
   const [status, setStatus] = useState(null);
   const [numbers, setNumbers] = useState([]);
   const [convs, setConvs] = useState([]);
-  const [send, setSend] = useState({ logical_id: "", to: "", text: "Hello from Charm.Studio!" });
+  const [send, setSend] = useState({ logical_id: "", to: "", text: "Hello from Custom Label!" });
   const [sending, setSending] = useState(false);
   const [copied, setCopied] = useState(false);
 

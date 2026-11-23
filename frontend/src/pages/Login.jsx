@@ -63,7 +63,7 @@ export default function Login({ onLoggedIn, notice }) {
         {mode === "sent" ? (
           <div data-testid="forgot-sent">
             <Notice tone="success">{sentMessage}</Notice>
-            <p className="text-sm text-muted">Check your inbox (and spam folder) for an email from Charm.Studio.</p>
+            <p className="text-sm text-muted">Check your inbox (and spam folder) for an email from Custom Label.</p>
           </div>
         ) : config?.password_reset_email ? (
           <form onSubmit={sendReset} data-testid="forgot-form">

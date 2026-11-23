@@ -497,7 +497,7 @@ export default function Orders() {
                       <TD>
                         <SourceBadge source={o.source} />
                       </TD>
-                      <TD className="whitespace-nowrap text-xs" title={`Saved in Charm.Studio ${formatDate(o.created_at)}`} data-testid={`order-date-${o.id}`}>
+                      <TD className="whitespace-nowrap text-xs" title={`Saved in Custom Label ${formatDate(o.created_at)}`} data-testid={`order-date-${o.id}`}>
                         {o.order_date ? (
                           <span className="text-ink">{niceDay(fromInput(o.order_date))}</span>
                         ) : (
@@ -553,7 +553,7 @@ export default function Orders() {
                       <TD>
                         <SourceBadge source={o.source} />
                       </TD>
-                      <TD className="whitespace-nowrap text-xs" title={`Saved in Charm.Studio ${formatDate(o.created_at)}`} data-testid={`order-date-${o.id}`}>
+                      <TD className="whitespace-nowrap text-xs" title={`Saved in Custom Label ${formatDate(o.created_at)}`} data-testid={`order-date-${o.id}`}>
                         {o.order_date ? (
                           <span className="text-ink">{niceDay(fromInput(o.order_date))}</span>
                         ) : (

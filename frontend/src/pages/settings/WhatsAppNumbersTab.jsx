@@ -109,7 +109,7 @@ function NumberDialog({ open, number, onClose, onSaved }) {
           <DialogTitle>{editing ? `Edit ${number.label}` : "Add a WhatsApp number"}</DialogTitle>
           <DialogDescription>
             {d360
-              ? "Paste this number's API key from the 360dialog Hub. Charm.Studio points the number's webhook here automatically."
+              ? "Paste this number's API key from the 360dialog Hub. Custom Label points the number's webhook here automatically."
               : "Find these in the Meta Developer Console under WhatsApp, then API Setup."}{" "}
             The key or token is encrypted before it's saved and is never shown again.
           </DialogDescription>
