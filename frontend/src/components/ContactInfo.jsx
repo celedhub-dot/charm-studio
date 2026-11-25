@@ -161,6 +161,11 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
           </div>
           <div className="mt-1 font-mono text-[15px] text-muted">{fmtPhone(phone)}</div>
           {name && <div className="mt-0.5 text-[11px] text-muted">Name from the customer's WhatsApp profile</div>}
+          {contact.saved_contact && (
+            <div className="mt-2 rounded-full bg-[#E9EDEF] px-3 py-1 text-[11px] font-medium text-[#54656F]" data-testid="contact-info-saved">
+              Saved contact: the bot doesn't reply or read this chat
+            </div>
+          )}
           <div className="mt-5 grid w-full grid-cols-4 gap-2">
             {[
               { icon: Copy, label: "Copy", onClick: () => copy(fmtPhone(phone), "Number"), testId: "info-copy" },

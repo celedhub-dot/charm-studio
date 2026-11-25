@@ -174,6 +174,11 @@ function ConversationList({
                   {c.name && <div className="truncate font-mono text-[11px] text-muted">{fmtPhone(c.customer_phone)}</div>}
                   <div className="mt-0.5 flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[13px] text-[#667781]">{c.last_preview}</span>
+                    {c.saved_contact && (
+                      <span className="shrink-0 rounded bg-[#E9EDEF] px-1.5 py-0.5 text-[10px] font-medium text-[#54656F]" title="Saved contact: the bot doesn't reply or read" aria-label="Saved contact">
+                        Saved
+                      </span>
+                    )}
                     {c.muted && <BellSlash size={15} className="shrink-0 text-[#8696A0]" aria-label="Muted" />}
                     {c.pinned_at && !c.archived && <PushPin size={15} weight="fill" className="shrink-0 text-[#8696A0]" aria-label="Pinned" />}
                     {c.unread > 0 && (
@@ -411,7 +416,8 @@ function OrdersPanel({ thread, onChanged, onConfirm, onClose }) {
     setReading(true);
     try {
       const res = await readOrdersAgain(contact.number_label, contact.customer_phone);
-      if (res.orders.length) toast.success(`Found ${res.orders.length} order${res.orders.length > 1 ? "s" : ""}`);
+      if (res.saved_contact) toast.info("This is a saved contact: the bot doesn't read their chats.");
+      else if (res.orders.length) toast.success(`Found ${res.orders.length} order${res.orders.length > 1 ? "s" : ""}`);
       else toast.info(res.ai_ready ? "No order details found in the recent messages" : "No order ID found. (AI isn't set up, so only order IDs are detected.)");
       onChanged();
     } catch (e) {

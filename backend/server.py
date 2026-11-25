@@ -2777,8 +2777,27 @@ _dispatch_notice = re.compile(
     r"(?:thank you for shopping with [\w &'-]{1,80}[.!]?)?", re.I)
 
 
+def normalize_contact_phone(raw: str) -> str:
+    """A phone number as WhatsApp sends it: digits with country code (Indian 10-digit numbers get 91)."""
+    digits = re.sub(r"\D", "", raw or "")
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) == 10 and digits[0] in "6789":
+        digits = "91" + digits
+    return digits if 8 <= len(digits) <= 15 else ""
+
+
+async def is_saved_contact(phone: str) -> bool:
+    """Saved contacts (team, family, suppliers...): the bot never replies to them or reads their chats."""
+    return bool(phone) and bool(await db().fetchval("SELECT 1 FROM saved_contacts WHERE phone = $1", phone))
+
+
 async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     biz = cfg["logical_id"]
+    if await is_saved_contact(customer):
+        return  # saved contact: never reply, never read
     conv = await db().fetchrow(
         "SELECT step, fields FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2",
         biz,
@@ -2987,6 +3006,8 @@ async def save_extracted_order(label: str, customer: str, row: Dict[str, str]) -
 
 
 async def read_order_details(label: str, customer: str) -> Dict[str, Any]:
+    if await is_saved_contact(customer):
+        return {"orders": [], "used_ai": False, "saved_contact": True}  # saved contacts' chats are never read
     """Read the customer's recent messages and save any orders found (AI if configured, else order-ID patterns)."""
     # Include every new inbound message plus recent context for corrections.
     rows = await db().fetch(
@@ -3149,6 +3170,8 @@ async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
         await record_message(label, customer, "in", kind, text, msg["id"], "received", "customer",
                              name=names.get(customer, ""), at=_msg_time(msg), media=message_media(msg))
         mode = cfg.get("bot_mode") or "ask"
+        if await is_saved_contact(customer):
+            continue  # saved contact: stored in Chats only; the bot never replies or reads
         if mode == "read" and kind in ("image", "video", "document") and text.strip():
             await schedule_read(label, customer)  # a photo's caption can carry the order details
             continue
@@ -3659,7 +3682,7 @@ async def inbox_conversations(
         conds.append(cond + ")")
     args.append(max(1, min(limit, 200)))
     rows = await db().fetch(
-        f"""SELECT c.*, (SELECT count(*) FROM orders o WHERE o.customer_phone = c.customer_phone
+        f"""SELECT c.*, EXISTS (SELECT 1 FROM saved_contacts s WHERE s.phone = c.customer_phone) AS saved_contact, (SELECT count(*) FROM orders o WHERE o.customer_phone = c.customer_phone
                           AND c.customer_phone <> '') AS order_count
             FROM wa_contacts c {"WHERE " + " AND ".join(conds) if conds else ""}
             ORDER BY (c.pinned_at IS NOT NULL AND NOT c.archived) DESC, c.pinned_at DESC NULLS LAST,
@@ -3681,7 +3704,7 @@ async def inbox_unread():
 
 async def _thread(label: str, phone: str) -> Dict[str, Any]:
     contact = await db().fetchrow(
-        "SELECT c.*, 0 AS order_count FROM wa_contacts c WHERE number_label = $1 AND customer_phone = $2", label, phone
+        "SELECT c.*, EXISTS (SELECT 1 FROM saved_contacts s WHERE s.phone = c.customer_phone) AS saved_contact, 0 AS order_count FROM wa_contacts c WHERE number_label = $1 AND customer_phone = $2", label, phone
     )
     if not contact:
         raise HTTPException(404, "No chat with this customer on that number yet.")
@@ -3780,6 +3803,96 @@ class ChatStateIn(BaseModel):
     muted: Optional[bool] = None
     archived: Optional[bool] = None
     unread: Optional[bool] = None  # true = mark as unread, false = mark as read
+    saved: Optional[bool] = None  # true = saved contact (bot never replies or reads), on every number
+
+
+class SavedContactIn(BaseModel):
+    phone: str = Field(..., min_length=6, max_length=40)
+    name: str = Field("", max_length=120)
+
+
+@api.get("/saved-contacts")
+async def saved_contacts_list():
+    rows = await db().fetch("SELECT phone, name, created_at FROM saved_contacts ORDER BY lower(name), phone")
+    return [row_dict(r) for r in rows]
+
+
+@api.post("/saved-contacts")
+async def saved_contacts_add(payload: SavedContactIn):
+    phone = normalize_contact_phone(payload.phone)
+    if not phone:
+        raise HTTPException(400, "Enter a phone number, e.g. 98765 43210 or +91 98765 43210.")
+    await db().execute("INSERT INTO saved_contacts (phone, name) VALUES ($1,$2) ON CONFLICT (phone) DO UPDATE SET "
+                       "name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE saved_contacts.name END",
+                       phone, payload.name.strip())
+    await db().execute("UPDATE wa_contacts SET bot_due_at = NULL, bot_since = NULL, read_due_at = NULL WHERE customer_phone = $1", phone)
+    return {"phone": phone, "name": payload.name.strip()}
+
+
+@api.delete("/saved-contacts/{phone}")
+async def saved_contacts_remove(phone: str):
+    res = await db().execute("DELETE FROM saved_contacts WHERE phone = $1", normalize_contact_phone(phone) or phone)
+    if res.endswith(" 0"):
+        raise HTTPException(404, "That number isn't in saved contacts.")
+    return {"removed": True}
+
+
+def parse_contacts_file(text: str) -> List[tuple]:
+    """(phone, name) pairs from a phone contacts export: vCard (.vcf) or CSV (e.g. Google Contacts)."""
+    out: List[tuple] = []
+    if "BEGIN:VCARD" in text.upper():
+        for card in re.split(r"(?i)BEGIN:VCARD", text)[1:]:
+            card = re.sub(r"\r?\n[ \t]", "", card)  # unfold long lines
+            name = ""
+            m = re.search(r"(?im)^FN[^:]*:(.*)$", card)
+            if m:
+                name = m.group(1).strip()
+            for tel in re.findall(r"(?im)^(?:item\d+\.)?TEL[^:]*:(.*)$", card):
+                phone = normalize_contact_phone(tel)
+                if phone:
+                    out.append((phone, name))
+        return out
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return out
+    header = [h.strip().lower() for h in rows[0]]
+    name_cols = [i for i, h in enumerate(header) if h in ("name", "full name", "display name", "first name")]
+    phone_cols = [i for i, h in enumerate(header) if "phone" in h and "type" not in h and "label" not in h or h in ("mobile", "number")]
+    body = rows[1:] if phone_cols else rows
+    for r in body:
+        cells = phone_cols or range(len(r))
+        name = " ".join(r[i].strip() for i in name_cols if i < len(r) and r[i].strip())
+        for i in cells:
+            if i < len(r):
+                for part in re.split(r":::|;|/", r[i]):
+                    phone = normalize_contact_phone(part)
+                    if phone:
+                        out.append((phone, name))
+    return out
+
+
+@api.post("/saved-contacts/import")
+async def saved_contacts_import(file: UploadFile = File(...)):
+    raw = await file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(413, "That file is over 5 MB. Export only the contacts you need.")
+    found = parse_contacts_file(raw.decode("utf-8-sig", errors="ignore"))
+    unique = {}
+    for phone, name in found:
+        if phone not in unique or (name and not unique[phone]):
+            unique[phone] = name
+    if not unique:
+        raise HTTPException(400, "No phone numbers found. Export your contacts as a .vcf (vCard) or .csv file.")
+    before = await db().fetchval("SELECT count(*) FROM saved_contacts")
+    async with db().acquire() as conn, conn.transaction():
+        await conn.executemany(
+            "INSERT INTO saved_contacts (phone, name) VALUES ($1,$2) ON CONFLICT (phone) DO UPDATE SET "
+            "name = CASE WHEN saved_contacts.name = '' THEN EXCLUDED.name ELSE saved_contacts.name END",
+            [(p, n[:120]) for p, n in unique.items()])
+        await conn.execute("UPDATE wa_contacts SET bot_due_at = NULL, bot_since = NULL, read_due_at = NULL "
+                           "WHERE customer_phone = ANY($1::text[])", list(unique))
+    after = await db().fetchval("SELECT count(*) FROM saved_contacts")
+    return {"numbers_in_file": len(unique), "added": after - before, "already_saved": len(unique) - (after - before)}
 
 
 @api.patch("/inbox/conversations/{label}/{phone}")
@@ -3796,11 +3909,23 @@ async def inbox_chat_state(label: str, phone: str, payload: ChatStateIn):
             sets.append("pinned_at = NULL")  # archiving unpins, like on a phone
     if payload.unread is not None:
         sets.append("unread = GREATEST(unread, 1)" if payload.unread else "unread = 0")
+    if payload.saved is not None:
+        exists = await db().fetchval("SELECT name FROM wa_contacts WHERE number_label=$1 AND customer_phone=$2", label, phone)
+        if exists is None:
+            raise HTTPException(404, "No chat with this customer on that number.")
+        if payload.saved:
+            await db().execute("INSERT INTO saved_contacts (phone, name) VALUES ($1,$2) ON CONFLICT (phone) DO NOTHING",
+                               phone, exists or "")
+            await db().execute("UPDATE wa_contacts SET bot_due_at = NULL, bot_since = NULL, read_due_at = NULL "
+                               "WHERE customer_phone = $1", phone)  # cancel anything already waiting
+        else:
+            await db().execute("DELETE FROM saved_contacts WHERE phone = $1", phone)
+        sets.append("number_label = number_label")  # nothing else to change on the chat row itself
     if not sets:
         raise HTTPException(400, "Nothing to change.")
     row = await db().fetchrow(
         f"UPDATE wa_contacts c SET {', '.join(sets)} WHERE number_label = $1 AND customer_phone = $2 "
-        "RETURNING c.*, (SELECT count(*) FROM orders o WHERE o.customer_phone = c.customer_phone "
+        "RETURNING c.*, EXISTS (SELECT 1 FROM saved_contacts s WHERE s.phone = c.customer_phone) AS saved_contact, (SELECT count(*) FROM orders o WHERE o.customer_phone = c.customer_phone "
         "AND c.customer_phone <> '') AS order_count",
         label, phone,
     )

@@ -14,6 +14,7 @@ import {
   Eraser,
   Trash,
   Export,
+  AddressBook,
 } from "@phosphor-icons/react";
 import { ConfirmDialog } from "./ui/overlays";
 import ExportChatDialog from "./ExportChatDialog";
@@ -113,6 +114,9 @@ export default function ChatMenu({ chat, onChanged, onDeleted, onMarkedUnread })
     chat.unread > 0
       ? { icon: CheckCircle, label: "Mark as read", run: () => change({ unread: false }) }
       : { icon: ChatCircleDots, label: "Mark as unread", run: () => change({ unread: true }) },
+    chat.saved_contact
+      ? { icon: AddressBook, label: "Remove from saved contacts", run: () => change({ saved: false }, "Removed: the bot treats this number as a customer again") }
+      : { icon: AddressBook, label: "Mark as saved contact", run: () => change({ saved: true }, "Saved contact: the bot won't reply or read this chat") },
     { icon: Export, label: "Export chat", run: () => ask("export") },
     { divider: true },
     { icon: Eraser, label: "Clear chat", run: () => ask("clear") },

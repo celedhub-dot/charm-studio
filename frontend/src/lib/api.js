@@ -152,6 +152,15 @@ export const deleteChat = (label, phone) => api.delete(threadPath(label, phone))
 // { pinned, muted, archived, unread }: any of them, true/false
 export const setChatState = (label, phone, state) => api.patch(threadPath(label, phone), state).then((r) => r.data);
 export const clearChat = (label, phone) => api.post(`${threadPath(label, phone)}/clear`).then((r) => r.data);
+// Saved contacts: the bot never replies to them or reads their chats
+export const getSavedContacts = () => api.get("/saved-contacts").then((r) => r.data);
+export const addSavedContact = (phone, name) => api.post("/saved-contacts", { phone, name }).then((r) => r.data);
+export const removeSavedContact = (phone) => api.delete(`/saved-contacts/${encodeURIComponent(phone)}`).then((r) => r.data);
+export const importSavedContacts = (file) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post("/saved-contacts/import", form).then((r) => r.data);
+};
 // WhatsApp-style export: .txt, or .zip with the photos/voice notes/files when media is true
 export const exportChat = async (label, phone, media) => {
   const res = await api.get(`${threadPath(label, phone)}/export`, {

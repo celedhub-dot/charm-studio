@@ -46,6 +46,9 @@ class FakeDB:
         history = state.get("history", [])
         return list(reversed(history)) if "ORDER BY created_at DESC" in q else history
 
+    async def fetchval(self, q, *a):  # e.g. "is this a saved contact?": none are in these tests
+        return None
+
     async def fetchrow(self, q, *a):
         if q.startswith("UPDATE orders SET"):
             row = next(o for o in saved if o["id"] == a[0])

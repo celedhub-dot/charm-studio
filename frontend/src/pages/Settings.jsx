@@ -1,5 +1,5 @@
 import { useSearchParams } from "react-router";
-import { UserCircle, WhatsappLogo, Storefront, Tag, ShieldCheck, FileText } from "@phosphor-icons/react";
+import { UserCircle, WhatsappLogo, Storefront, Tag, ShieldCheck, FileText, AddressBook } from "@phosphor-icons/react";
 import { PageHeader } from "../components/common";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/overlays";
 import AccountTab from "./settings/AccountTab";
@@ -9,11 +9,13 @@ import ShopBotTab from "./settings/ShopBotTab";
 import LabelsTab from "./settings/LabelsTab";
 import SecurityTab from "./settings/SecurityTab";
 import EmployeeTab from "./settings/EmployeeTab";
+import SavedContactsTab from "./settings/SavedContactsTab";
 
 const TABS = [
   { id: "employee", label: "Employee access", icon: UserCircle, Component: EmployeeTab },
   { id: "account", label: "Account", icon: UserCircle, Component: AccountTab },
   { id: "whatsapp", label: "WhatsApp numbers", icon: WhatsappLogo, Component: WhatsAppNumbersTab },
+  { id: "saved", label: "Saved contacts", icon: AddressBook, Component: SavedContactsTab },
   { id: "templates", label: "Templates", icon: FileText, Component: TemplatesTab },
   { id: "shop", label: "Shop & bot", icon: Storefront, Component: ShopBotTab },
   { id: "labels", label: "Label defaults", icon: Tag, Component: LabelsTab },

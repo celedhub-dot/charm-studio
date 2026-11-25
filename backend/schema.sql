@@ -179,3 +179,11 @@ CREATE TABLE IF NOT EXISTS employee_access (
     permissions text[] NOT NULL
 );
 ALTER TABLE employee_access ENABLE ROW LEVEL SECURITY;
+
+-- Saved contacts (team, family, suppliers...): the bot never replies to them or reads their chats, on any number
+CREATE TABLE IF NOT EXISTS saved_contacts (
+    phone      text PRIMARY KEY,
+    name       text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE saved_contacts ENABLE ROW LEVEL SECURITY;
