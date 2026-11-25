@@ -2551,9 +2551,10 @@ async def record_message(
     preview = (("You: " if direction == "out" else "") + (shown or f"[{kind}]")).replace("\n", " ")[:120]
     await db().execute(
         """
-        INSERT INTO wa_contacts (number_label, customer_phone, name, last_preview, last_message_at, last_inbound_at, unread)
+        INSERT INTO wa_contacts (number_label, customer_phone, name, last_preview, last_message_at, last_inbound_at,
+                                 window_inbound_at, unread)
         VALUES ($1, $2, $3, $4, $5::timestamptz, CASE WHEN $6::boolean THEN $5::timestamptz END,
-                CASE WHEN $6::boolean THEN 1 ELSE 0 END)
+                CASE WHEN $6::boolean THEN $5::timestamptz END, CASE WHEN $6::boolean THEN 1 ELSE 0 END)
         ON CONFLICT (number_label, customer_phone) DO UPDATE SET
             name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE wa_contacts.name END,
             last_preview = CASE WHEN EXCLUDED.last_message_at >= wa_contacts.last_message_at
@@ -2563,6 +2564,10 @@ async def record_message(
                                    THEN GREATEST(COALESCE(wa_contacts.last_inbound_at, EXCLUDED.last_message_at),
                                                  EXCLUDED.last_message_at)
                                    ELSE wa_contacts.last_inbound_at END,
+            window_inbound_at = CASE WHEN $6::boolean
+                                     THEN GREATEST(COALESCE(wa_contacts.window_inbound_at, EXCLUDED.last_message_at),
+                                                   EXCLUDED.last_message_at)
+                                     ELSE wa_contacts.window_inbound_at END,
             unread = CASE WHEN $6::boolean THEN wa_contacts.unread + 1 ELSE wa_contacts.unread END,
             archived = CASE WHEN $6::boolean THEN false ELSE wa_contacts.archived END
         """,
@@ -2591,6 +2596,10 @@ async def send_payload(
     else:
         error = _api_error(resp)
         log.warning("WhatsApp send failed (%s): %s", resp.status_code, resp.text[:500])
+        if '"code":131047' in resp.text.replace(" ", ""):  # WhatsApp says its 24-hour window is closed: believe it
+            await db().execute("UPDATE wa_contacts SET window_inbound_at = NULL WHERE number_label = $1 AND customer_phone = $2",
+                               cfg["logical_id"], to)
+            error = "The 24-hour reply window is closed on WhatsApp's side. Send a template instead."
     try:
         await record_message(cfg["logical_id"], to, "out", kind, text, wamid, "sent" if resp.status_code < 300 else "failed",
                              source, error, media=media)
@@ -3679,7 +3688,7 @@ class InboxSendIn(BaseModel):
 
 def conversation_public(r: asyncpg.Record) -> Dict[str, Any]:
     d = row_dict(r)
-    last_in = r["last_inbound_at"]
+    last_in = r["window_inbound_at"]  # only messages that reached WhatsApp's API open the reply window
     closes = last_in.timestamp() + REPLY_WINDOW if last_in else None
     d["window_open"] = bool(closes and closes > time.time())
     d["window_closes_at"] = datetime.fromtimestamp(closes, timezone.utc).isoformat() if closes else None
@@ -3764,7 +3773,9 @@ async def _thread(label: str, phone: str) -> Dict[str, Any]:
         names = {r["phone"]: r["name"] for r in await db().fetch(
             "SELECT phone, name FROM saved_contacts WHERE phone = ANY($1::text[]) AND name <> ''", senders)}
         for m in out_messages:
-            m["sender_name"] = names.get(m.get("sender") or "", "")
+            sender = m.get("sender") or ""
+            # a saved contact's name for a number; a name copied from the phone (WhatsApp Web) is shown as it is
+            m["sender_name"] = names.get(sender, "") if sender.isdigit() else sender
     return {
         "stats": row_dict(stats),
         "contact": conversation_public(contact),
@@ -4030,7 +4041,7 @@ async def inbox_delete_chat(label: str, phone: str):
 
 async def reply_window_open(cfg: Dict[str, Any], to: str) -> bool:
     last_in = await db().fetchval(
-        "SELECT last_inbound_at FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", cfg["logical_id"], to
+        "SELECT window_inbound_at FROM wa_contacts WHERE number_label = $1 AND customer_phone = $2", cfg["logical_id"], to
     )
     return bool(last_in and last_in.timestamp() + REPLY_WINDOW >= time.time())
 
@@ -4507,7 +4518,7 @@ async def inbox_export_chat(label: str, phone: str, media: bool = False, tz: Opt
         if m["direction"] != "in":
             who = shop
         elif m["sender"]:  # group message: who in the group sent it
-            who = saved_names.get(m["sender"]) or f"+{m['sender']}"
+            who = saved_names.get(m["sender"]) or (f"+{m['sender']}" if m["sender"].isdigit() else m["sender"])
         else:
             who = customer
         caption = m["body"] if m["body"] and m["body"] != m["media_name"] else ""

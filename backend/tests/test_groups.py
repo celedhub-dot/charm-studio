@@ -98,10 +98,12 @@ try:
              "VALUES ('Shop A',$1,'Order Group','My order 346654813867976704_1',$2,0,'group',$2)", GROUP, NOW - timedelta(days=2)),
             (f"INSERT INTO {q}wa_contacts (number_label, customer_phone, name, last_preview, last_message_at, unread) "
              "VALUES ('Shop A','919000000083','Customer','hi',$1,0)", NOW),
+            (f"UPDATE {q}wa_contacts SET last_inbound_at = now() - interval '1 hour' WHERE customer_phone = '919000000083'"),
             (f"INSERT INTO {q}wa_messages (id, number_label, customer_phone, direction, kind, body, status, source, error, created_at, sender) VALUES "
              "('gm1','Shop A',$1,'in','text','My order 346654813867976704_1, name AARAV','received','customer','',$2,'919000000081'),"
              "('gm2','Shop A',$1,'in','text','Packed','received','customer','',$3,'919000000082'),"
-             "('gm3','Shop A',$1,'out','text','Thanks','sent','phone_app','',$4,'')",
+             "('gm3','Shop A',$1,'out','text','Thanks','sent','phone_app','',$4,''),"
+             "('gm4','Shop A',$1,'in','text','Noted','received','customer','',$4,'Phone Contact')",
              GROUP, NOW - timedelta(days=2, minutes=3), NOW - timedelta(days=2, minutes=2), NOW - timedelta(days=2, minutes=1)),
         ))
 
@@ -113,6 +115,7 @@ try:
         check(ms["gm1"]["sender"] == "919000000081" and ms["gm1"]["sender_name"] == "", "each message keeps its sender's number")
         check(ms["gm2"]["sender_name"] == "Team Member", "a saved contact's name is shown instead of the number")
         check(th["orders"] == [], "no orders panel for a group")
+        check(ms["gm4"]["sender_name"] == "Phone Contact", "a sender name copied from the phone shows as it is")
 
         print("Bot and AI stay out")
         rr = c.post(f"/api/inbox/conversations/Shop A/{GROUP}/read-orders", headers=H(tok)).json()
@@ -137,6 +140,15 @@ try:
         check(r.status_code == 400, "a group can't be marked as a saved contact")
         r = c.patch(f"/api/inbox/conversations/Shop A/{GROUP}", headers=H(tok), json={"pinned": False})
         check(r.status_code == 200 and r.json()["pinned_at"] is None, "can still be unpinned")
+
+        print("Reply window")
+        c2 = [x for x in c.get("/api/inbox/conversations", headers=H(tok)).json() if x["customer_phone"] == "919000000083"][0]
+        check(not c2["window_open"], "history copied from the phone doesn't open WhatsApp's 24-hour window")
+        value = {"contacts": [{"wa_id": "919000000083", "profile": {"name": "Customer"}}],
+                 "messages": [{"id": "rw1", "from": "919000000083", "type": "text", "timestamp": str(int(time.time())), "text": {"body": "hello"}}]}
+        c.post(hook, json={"object": "whatsapp_business_account", "entry": [{"changes": [{"field": "messages", "value": value}]}]})
+        c2 = [x for x in c.get("/api/inbox/conversations", headers=H(tok)).json() if x["customer_phone"] == "919000000083"][0]
+        check(c2["window_open"], "a message that reaches WhatsApp's API opens it")
 
         print("Export")
         txt = c.get(f"/api/inbox/conversations/Shop A/{GROUP}/export", headers=H(tok)).text

@@ -191,3 +191,10 @@ ALTER TABLE saved_contacts ENABLE ROW LEVEL SECURITY;
 -- Group chats imported from the phone app (read-only; the bot never reads or replies there)
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS chat_kind text NOT NULL DEFAULT 'direct';
 ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS sender text NOT NULL DEFAULT '';
+-- The 24-hour reply window counts only customer messages that reached WhatsApp's API, never ones copied in from a
+-- phone export/backup (WhatsApp doesn't know about those, and refuses replies as "re-engagement")
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS window_inbound_at timestamptz;
+UPDATE wa_contacts c SET window_inbound_at = m.at
+FROM (SELECT number_label, customer_phone, max(created_at) AS at FROM wa_messages
+      WHERE direction = 'in' AND wa_message_id IS NOT NULL GROUP BY 1, 2) m
+WHERE c.window_inbound_at IS NULL AND m.number_label = c.number_label AND m.customer_phone = c.customer_phone;
