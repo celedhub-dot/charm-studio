@@ -8,8 +8,10 @@ import TemplatesTab from "./settings/TemplatesTab";
 import ShopBotTab from "./settings/ShopBotTab";
 import LabelsTab from "./settings/LabelsTab";
 import SecurityTab from "./settings/SecurityTab";
+import EmployeeTab from "./settings/EmployeeTab";
 
 const TABS = [
+  { id: "employee", label: "Employee access", icon: UserCircle, Component: EmployeeTab },
   { id: "account", label: "Account", icon: UserCircle, Component: AccountTab },
   { id: "whatsapp", label: "WhatsApp numbers", icon: WhatsappLogo, Component: WhatsAppNumbersTab },
   { id: "templates", label: "Templates", icon: FileText, Component: TemplatesTab },

@@ -7,6 +7,7 @@ WhatsApp is replaced by a fake HTTP transport, so the real download/upload code 
     .venv/Scripts/python.exe tests/test_media.py
 """
 import asyncio
+import hmac
 import json
 import os
 import secrets
@@ -30,6 +31,7 @@ os.environ.update(
         "ADMIN_PASSWORD": "legacy-pass-123",
         "RESET_PASSWORD": "",
         "WA_NUMBERS": "",
+        "META_APP_SECRET": "test-media-signing-secret",
         "ANTHROPIC_API_KEY": "",
         "AI_PROVIDER": "anthropic",
         "READ_DEBOUNCE_SECONDS": "0.3",
@@ -176,8 +178,10 @@ try:
 
         # Meta number: Graph API lookup with the bearer token
         c.post("/api/wa/numbers", headers=H(tok), json={"label": "Meta", "phone_id": "1234567890", "token": "EAAtest-token-0123456789", "skip_check": True})
-        c.post("/api/wa/webhook", json=payload([{"id": "wamid.M1", "from": "919876543210", "type": "image", "timestamp": now,
-                                                  "image": {"id": "meta-photo", "mime_type": "image/png"}}]))
+        body = json.dumps(payload([{"id": "wamid.M1", "from": "919876543210", "type": "image", "timestamp": now,
+                                   "image": {"id": "meta-photo", "mime_type": "image/png"}}])).encode()
+        signature = hmac.digest(os.environ["META_APP_SECRET"].encode(), body, "sha256").hex()
+        assert c.post("/api/wa/webhook", content=body, headers={"X-Hub-Signature-256": "sha256=" + signature}).status_code == 200
         mid = c.get("/api/inbox/conversations/Meta/919876543210", headers=H(tok)).json()["messages"][0]["id"]
         r = c.get(f"/api/inbox/media/{mid}", headers=H(tok))
         check(r.status_code == 200 and r.content == b"\x89PNGmeta", "Meta number's photo downloaded with its token")

@@ -62,7 +62,7 @@ async def main():
     await server.ai_extract_message("Hi my order is 123456789012_1 please print AARAV with heart charm")
     c = calls[-1]
     check(c["model"] == "claude-haiku-5-5", "ask-questions bot runs on Haiku", c["model"])
-    check(c["extra_body"].get("output_config") == {"effort": "low"}, "Haiku gets effort low")
+    check(c["extra_body"].get("output_config") == {"effort": "medium"}, "Haiku gets effort medium (the owner's chosen default)")
     check("fallbacks" not in c["extra_body"] and not c["betas"], "no fallbacks sent to Haiku (it has none)")
     check(c["max_tokens"] == 2000, "short replies for the bot")
 

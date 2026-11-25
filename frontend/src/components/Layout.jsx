@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router";
-import { SquaresFour, Package, ChatsCircle, ChatCenteredText, Tag, Robot, List, X, Sparkle, SignOut, GearSix } from "@phosphor-icons/react";
+import { Navigate, NavLink, Outlet, useLocation } from "react-router";
+import { SquaresFour, Package, ChatsCircle, ChatCenteredText, Tag, Robot, List, X, SignOut, GearSix } from "@phosphor-icons/react";
+import BrandMark, { useBrandLogo } from "./BrandMark";
 import { cn } from "../lib/utils";
 import { useSession } from "../lib/session";
 import { getUnread } from "../lib/api";
@@ -15,13 +16,16 @@ export const NAV = [
   { to: "/bot", label: "WhatsApp Bot", icon: Robot, id: "bot" },
 ];
 const SETTINGS_NAV = { to: "/settings", label: "Settings", icon: GearSix, id: "settings" };
+const pagePermissions = { "/": "dashboard", "/chats": "chats", "/customer-data": "customers",
+  "/orders": "orders", "/extract": "extract", "/labels": "labels" };
+function allowed(me, path) {
+  return me?.role !== "employee" || me.permissions.includes(pagePermissions[path]);
+}
 
 function Logo({ shopName }) {
   return (
     <div className="flex items-center gap-2.5">
-      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-forest text-white">
-        <Sparkle size={18} weight="fill" />
-      </div>
+      <BrandMark size={36} iconSize={18} />
       <div className="min-w-0 leading-tight">
         <div className="font-heading text-lg font-extrabold tracking-tight text-ink">
           Custom <span className="text-terracotta">Label</span>
@@ -69,9 +73,10 @@ function NavItem({ to, label, icon: Icon, id, onNavigate, count = 0 }) {
 }
 
 // Unread customer messages, for the Chats badge.
-function useUnread() {
+function useUnread(enabled) {
   const [unread, setUnread] = useState(0);
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     const load = () =>
       getUnread()
@@ -83,15 +88,16 @@ function useUnread() {
       alive = false;
       clearInterval(t);
     };
-  }, []);
+  }, [enabled]);
   return unread;
 }
 
 function NavItems({ onNavigate }) {
-  const unread = useUnread();
+  const { me } = useSession();
+  const unread = useUnread(allowed(me, "/chats"));
   return (
     <nav className="flex flex-col gap-1">
-      {NAV.map(({ badge, ...item }) => (
+      {NAV.filter(item => allowed(me, item.to)).map(({ badge, ...item }) => (
         <NavItem key={item.to} {...item} count={badge === "unread" ? unread : 0} onNavigate={onNavigate} />
       ))}
     </nav>
@@ -100,6 +106,8 @@ function NavItems({ onNavigate }) {
 
 function AccountBox({ onNavigate, testPrefix = "" }) {
   const { me, logout } = useSession();
+  const logo = useBrandLogo();
+  const [logoBroken, setLogoBroken] = useState(false);
   const name = me?.name || "Account";
   const initials = name
     .split(" ")
@@ -109,11 +117,21 @@ function AccountBox({ onNavigate, testPrefix = "" }) {
     .join("");
   return (
     <div className="space-y-1">
-      <NavItem {...SETTINGS_NAV} id={`${testPrefix}settings`} onNavigate={onNavigate} />
+      {allowed(me, "/settings") && <NavItem {...SETTINGS_NAV} id={`${testPrefix}settings`} onNavigate={onNavigate} />}
       <div className="mt-2 flex items-center gap-3 rounded-xl border border-line bg-white p-2.5">
-        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-terracotta-50 font-heading text-sm font-bold text-terracotta-700">
-          {initials || "?"}
-        </div>
+        {logo && !logoBroken ? (
+          <img
+            src={logo}
+            alt=""
+            onError={() => setLogoBroken(true)}
+            className="h-9 w-9 shrink-0 rounded-full border border-line bg-white object-cover"
+            data-testid={`${testPrefix}account-avatar`}
+          />
+        ) : (
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-terracotta-50 font-heading text-sm font-bold text-terracotta-700">
+            {initials || "?"}
+          </div>
+        )}
         <div className="min-w-0 flex-1 leading-tight">
           <div className="truncate text-sm font-semibold text-ink" data-testid={`${testPrefix}account-name`}>
             {name}
@@ -137,7 +155,8 @@ function AccountBox({ onNavigate, testPrefix = "" }) {
 export default function Layout() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
-  const { settings } = useSession();
+  const { settings, me } = useSession();
+  const firstAllowed = NAV.find(item => allowed(me, item.to));
   const shopName = settings?.shop?.shop_name || "";
   useEffect(() => setOpen(false), [location.pathname]);
 
@@ -193,7 +212,8 @@ export default function Layout() {
 
       <main className="lg:pl-64">
         <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
-          <Outlet />
+          {allowed(me, location.pathname) ? <Outlet /> : firstAllowed ? <Navigate to={firstAllowed.to} replace /> :
+            <p>Your owner has disabled access to all sections.</p>}
         </div>
       </main>
     </div>

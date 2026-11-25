@@ -20,7 +20,7 @@ BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 load_dotenv(BACKEND / ".env")
 
-SCHEMA = "charm_test"
+SCHEMA = "charm_test_" + secrets.token_hex(6)
 WA_TOKEN = "EAAtesttoken1234567890abcdWXYZ"
 os.environ.update(
     {
@@ -28,6 +28,9 @@ os.environ.update(
         "AUTH_SECRET": secrets.token_urlsafe(48),
         "ADMIN_PASSWORD": "legacy-pass-123",
         "BOT_REPLY_WAIT_SECONDS": "0",
+        "BOT_FEWER_FOLLOWUPS": "false",
+        "ANTHROPIC_API_KEY": "",
+        "OLLAMA_API_KEY": "",
         "RESET_PASSWORD": "",
         "RESEND_API_KEY": "re_test_fake",
         "FRONTEND_URL": "http://localhost:3000",
@@ -80,6 +83,7 @@ async def fake_send_wa(cfg, to, text):
 server.send_reset_email = fake_send_reset_email
 server.meta_check = fake_meta_check
 server.send_wa = fake_send_wa
+server.ORDER_ID_GUIDE = BACKEND / "unavailable-guide-for-account-test"
 
 passed = 0
 
@@ -115,6 +119,27 @@ try:
         r = c.post("/api/account/setup", headers=H(setup_token), json={"name": "  Priya   S ", "email": "Priya@Example.com", "password": "mango-river-42"})
         check(r.status_code == 200 and r.json()["scope"] == "full", "setup completes with a full token")
         tok = r.json()["token"]
+        employee = "emp101@gmail.com"
+        access = c.get("/api/employee", headers=H(tok)).json()
+        assert access["username"] == employee and len(access["permissions"]) == 13
+        temporary = c.post("/api/employee/temporary-password", headers=H(tok)).json()["password"]
+        first = c.post("/api/auth/login", json={"email": employee, "password": temporary}).json()
+        assert first["scope"] == "password"
+        assert c.get("/api/orders", headers=H(first["token"])).status_code == 403
+        employee_token = c.post("/api/account/password", headers=H(first["token"]),
+                                json={"current_password": "", "new_password": "employee-test-pass-481"}).json()["token"]
+        assert c.get("/api/orders", headers=H(employee_token)).status_code == 200
+        assert c.get("/api/employee", headers=H(employee_token)).status_code == 403
+        assert c.get("/api/account", headers=H(employee_token)).status_code == 403
+        for key in ("orders", "ai_labels"):
+            assert c.patch("/api/employee", headers=H(tok), json={"key": key, "enabled": False}).status_code == 200
+        assert c.get("/api/orders", headers=H(employee_token)).status_code == 403
+        assert c.post("/api/pdf/analyze", headers=H(employee_token), data={"model": "paid"},
+                      files={"file": ("test.pdf", b"test")}).status_code == 403
+        assert c.patch("/api/employee", headers=H(tok), json={"key": "enabled", "enabled": False}).status_code == 200
+        assert c.get("/api/auth/me", headers=H(employee_token)).status_code == 401
+        assert c.post("/api/auth/forgot", json={"email": employee}).status_code == 200 and not sent_emails
+        print("Employee first login, revocation, owner isolation, AI permissions and disabling passed.")
         check(c.get("/api/auth/me", headers=H(setup_token)).status_code == 401, "old setup token stops working")
         me = c.get("/api/auth/me", headers=H(tok)).json()
         check(me["name"] == "Priya S" and me["email"] == "priya@example.com", "name trimmed, email lowercased")

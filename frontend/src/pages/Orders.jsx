@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
+import { useSession } from "../lib/session";
 import Papa from "papaparse";
 import { toast } from "sonner";
 import {
@@ -193,6 +194,9 @@ function OrderSheetDialog({ open, onClose, initial }) {
 }
 
 export default function Orders() {
+  const { me } = useSession();
+  const owner = me?.role !== "employee";
+  const can = key => owner || me.permissions.includes(key);
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -345,17 +349,17 @@ export default function Orders() {
         subtitle="Every customisation you have recorded, ready to stamp onto labels."
         actions={
           <>
-            <Button variant="outline" data-testid="order-sheet-btn" onClick={() => setSheetOpen(true)}>
+            <Button disabled={!can("exports")} variant="outline" data-testid="order-sheet-btn" onClick={() => setSheetOpen(true)}>
               <FilePdf size={16} /> Order sheet PDF
             </Button>
-            <Button variant="outline" data-testid="export-csv-btn" onClick={exportCsv} disabled={exporting}>
+            <Button variant="outline" data-testid="export-csv-btn" onClick={exportCsv} disabled={exporting || !can("exports")}>
               {exporting ? <Spinner /> : <DownloadSimple size={16} />} Export CSV
             </Button>
-            <Button variant="outline" data-testid="import-csv-btn" onClick={() => fileRef.current?.click()}>
+            <Button disabled={!can("create")} variant="outline" data-testid="import-csv-btn" onClick={() => fileRef.current?.click()}>
               <UploadSimple size={16} /> Import CSV
             </Button>
             <input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={onCsvPicked} data-testid="import-csv-input" />
-            <ConfirmDialog
+            {owner && <ConfirmDialog
               testId="delete-all"
               title="Delete all orders?"
               description="This permanently removes every order. It cannot be undone. Export a CSV first if you need a backup."
@@ -366,12 +370,12 @@ export default function Orders() {
                   <Trash size={16} /> Delete all
                 </Button>
               }
-            />
+            />}
           </>
         }
       />
 
-      <Card className="mb-6">
+      {can("create") && <Card className="mb-6">
         <CardHeader>
           <CardTitle>New order</CardTitle>
         </CardHeader>
@@ -390,7 +394,7 @@ export default function Orders() {
             </div>
           </form>
         </CardContent>
-      </Card>
+      </Card>}
 
       <Card>
         <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -574,10 +578,10 @@ export default function Orders() {
                               <PaperPlaneRight size={16} className={o.confirmed_at ? "text-muted" : "text-forest"} />
                             </Button>
                           )}
-                          <Button size="icon" variant="ghost" onClick={() => startEdit(o)} data-testid={`edit-order-${o.id}-btn`} aria-label="Edit">
+                          <Button disabled={!can("edit")} size="icon" variant="ghost" onClick={() => startEdit(o)} data-testid={`edit-order-${o.id}-btn`} aria-label="Edit">
                             <PencilSimple size={16} />
                           </Button>
-                          <ConfirmDialog
+                          {owner && <ConfirmDialog
                             testId={`delete-order-${o.id}`}
                             title="Delete this order?"
                             description={`Order ${o.order_id || ""} will be removed permanently.`}
@@ -588,7 +592,7 @@ export default function Orders() {
                                 <Trash size={16} className="text-danger" />
                               </Button>
                             }
-                          />
+                          />}
                         </div>
                       </TD>
                     </TR>

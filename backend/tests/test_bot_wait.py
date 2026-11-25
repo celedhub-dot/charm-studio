@@ -58,6 +58,8 @@ sent = []  # (to, text) for every bot reply
 
 async def fake_send(cfg, to, text, source="bot"):
     sent.append((to, text))
+    # like the real sender, keep the bot's message in the chat (the bot reads recent chat for context)
+    await server.record_message(cfg["logical_id"], to, "out", "text", text, None, "sent", source)
 
 
 server.d360_set_webhook = fake_set_webhook
@@ -129,13 +131,16 @@ try:
         check(not replies_to(a), "no reply while the customer is still typing")
         wait_for(lambda: replies_to(a), "bot replies after the pause")
         time.sleep(1.5)
-        check(len(replies_to(a)) == 1 and "note" in replies_to(a)[0].lower(), "one reply, asking only what's missing", str(replies_to(a)))
-        msg(c, hook, "a4", a, "none")
+        # Fewer follow-ups: no separate "Any notes?" question; the order is saved and confirmed in one reply.
+        check(len(replies_to(a)) == 1, "one reply for the whole burst", str(replies_to(a)))
         wait_for(lambda: c.get("/api/orders?q=123456789012", headers=H(tok)).json(), "order saved")
         o = c.get("/api/orders?q=123456789012", headers=H(tok)).json()[0]
         check((o["product_name"], o["charm"], o["quantity"], o["colour"]) == ("AARAV", "5", "2", "black"), "name, charm number, quantity and colour saved", o)
-        wait_for(lambda: len(replies_to(a)) == 2, "thank-you sent")
-        check("Quantity: 2" in replies_to(a)[1] and "Colour: black" in replies_to(a)[1], "thank-you lists colour and quantity", replies_to(a)[1])
+        check("Quantity: 2" in replies_to(a)[0] and "Colour: black" in replies_to(a)[0], "thank-you lists colour and quantity", replies_to(a)[0])
+        for k, closing in enumerate(("none", "ok thanks 👍")):
+            msg(c, hook, f"a{4 + k}", a, closing)
+            time.sleep(server.BOT_WAIT_S + 3)
+            check(len(replies_to(a)) == 1, f"'{closing}' after the thank-you: no reply", str(replies_to(a)))
 
         print("A reply laid out like the shop's numbered greeting")
         b = "919000000012"
@@ -152,10 +157,14 @@ try:
         shop_says(c, hook, "g2", d, GREETING)
         msg(c, hook, "d1", d, "555566667777_1\nMeera\n7\n3")
         wait_for(lambda: replies_to(d), "bot replies")
-        msg(c, hook, "d2", d, "gift wrap please")
         wait_for(lambda: c.get("/api/orders?q=555566667777", headers=H(tok)).json(), "order saved")
         o = c.get("/api/orders?q=555566667777", headers=H(tok)).json()[0]
-        check((o["product_name"], o["charm"], o["quantity"], o["notes"]) == ("Meera", "7", "3", "gift wrap please"), "unlabelled lines follow the shop's list", o)
+        check((o["product_name"], o["charm"], o["quantity"]) == ("Meera", "7", "3"), "unlabelled lines follow the shop's list", o)
+        # A detail sent after the order is saved updates that same order (no AI here, so the pattern reads "gift wrap").
+        msg(c, hook, "d2", d, "gift wrap please")
+        wait_for(lambda: "gift wrap" in (c.get("/api/orders?q=555566667777", headers=H(tok)).json()[0]["notes"] or ""),
+                 "late note added to the saved order")
+        check(len(c.get("/api/orders?q=555566667777", headers=H(tok)).json()) == 1, "late detail updates the order, no duplicate")
 
         print("A reply waiting when the server stops")
         server.BOT_WAIT_S = 60

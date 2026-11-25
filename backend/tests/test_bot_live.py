@@ -45,7 +45,8 @@ CASES = [
 async def main():
     ok = 0
     for msg, asked, known, want in CASES:
-        got = await server.ai_bot_turn(msg, asked, known)
+        turn = await server.ai_bot_turn(msg, asked, known)
+        got = turn[0] if turn else {}
         good = all((v == "" and not got.get(k)) or (v and v in (got.get(k) or "").lower()) for k, v in want.items())
         if "notes" in want and want["notes"] == "":
             good = good and got.get("notes", None) in ("", None) and ("notes" in got or asked != "notes")

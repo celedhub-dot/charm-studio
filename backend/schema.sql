@@ -169,3 +169,13 @@ ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS pending_details jsonb NOT NULL 
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS details_read_at timestamptz;
 
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS reply_language text NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS employee_access (
+    username text PRIMARY KEY,
+    password_hash text NOT NULL DEFAULT '',
+    must_change boolean NOT NULL DEFAULT true,
+    enabled boolean NOT NULL DEFAULT true,
+    version bigint NOT NULL DEFAULT 1,
+    permissions text[] NOT NULL
+);
+ALTER TABLE employee_access ENABLE ROW LEVEL SECURITY;

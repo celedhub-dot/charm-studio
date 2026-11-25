@@ -1,4 +1,4 @@
-import { Sparkle } from "@phosphor-icons/react";
+import BrandMark from "./BrandMark";
 
 // Centered card used by the login, setup and reset screens.
 export default function AuthShell({ title, subtitle, children, footer }) {
@@ -6,9 +6,7 @@ export default function AuthShell({ title, subtitle, children, footer }) {
     <div className="flex min-h-screen items-center justify-center bg-cream px-4 py-10">
       <div className="page-enter w-full max-w-sm">
         <div className="mb-8 flex flex-col items-center gap-3 text-center">
-          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-forest text-white shadow-lift">
-            <Sparkle size={22} weight="fill" />
-          </div>
+          <BrandMark size={48} iconSize={22} className="shadow-lift" />
           <h1 className="font-heading text-2xl font-extrabold text-ink">
             {title || (
               <>

@@ -45,5 +45,7 @@ services:
         value: v20.0
       - key: WA_VERIFY_TOKEN
         generateValue: true
+      - key: META_APP_SECRET
+        sync: false # Meta app's App Secret for incoming Cloud API notifications
       # WhatsApp numbers are added in the app (Settings -> WhatsApp numbers).
       # Emergency login: add RESET_PASSWORD by hand only when locked out, then remove it.

@@ -196,7 +196,7 @@ export default function LabelStudio() {
   const [analysis, setAnalysis] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const { settings } = useSession();
+  const { settings, me } = useSession();
   const defaults = settings?.labels;
   const [position, setPosition] = useState(defaults?.position || "bottom-right");
   const [skipUnmatched, setSkipUnmatched] = useState(!!defaults?.skip_unmatched);
@@ -224,7 +224,8 @@ export default function LabelStudio() {
     setOverrides({});
     setAnalyzing(true);
     try {
-      const [res, all] = await Promise.all([analyzePdf(f, model, effort), getOrders()]);
+      const canViewOrders = me?.role !== "employee" || me.permissions.includes("orders");
+      const [res, all] = await Promise.all([analyzePdf(f, model, effort), canViewOrders ? getOrders() : []]);
       setAnalysis(res);
       setOrders(all);
       toast.success(`Analysed ${res.summary.total_pages} pages`);
@@ -301,7 +302,7 @@ export default function LabelStudio() {
       {!file && <div className="mb-5 flex flex-wrap gap-4 rounded-xl border border-line bg-white p-4">
         <label>Label reader <select className="ml-2 rounded border p-2" value={model} onChange={e => setModel(e.target.value)}>
           <option value="">Standard order matching (no AI charge)</option>
-          {options?.models?.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+          {(me?.role !== "employee" || me.permissions.includes("ai_labels")) && options?.models?.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
         </select></label>
         {model && <label>Effort <select className="ml-2 rounded border p-2" value={effort} onChange={e => setEffort(e.target.value)}>
           {options.efforts.map(e => <option key={e}>{e}</option>)}

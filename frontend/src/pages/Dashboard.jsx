@@ -13,6 +13,7 @@ import {
   PencilSimple,
 } from "@phosphor-icons/react";
 import { getOrders, getStats, errorMessage } from "../lib/api";
+import { useSession } from "../lib/session";
 import { PageHeader, StatCard, SourceBadge, EmptyState } from "../components/common";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/primitives";
 import { Button } from "../components/ui/button";
@@ -26,19 +27,21 @@ const ACTIONS = [
 ];
 
 export default function Dashboard() {
+  const { me } = useSession();
+  const viewOrders = me?.role !== "employee" || me.permissions.includes("orders");
   const [stats, setStats] = useState(null);
   const [recent, setRecent] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([getStats(), getOrders()])
+    Promise.all([getStats(), viewOrders ? getOrders() : []])
       .then(([s, o]) => {
         setStats(s);
         setRecent(o.slice(0, 8));
       })
       .catch((e) => toast.error(errorMessage(e, "Could not load dashboard")))
       .finally(() => setLoading(false));
-  }, []);
+  }, [viewOrders]);
 
   const bySource = stats?.by_source || {};
   const sourceSummary = Object.entries(bySource)

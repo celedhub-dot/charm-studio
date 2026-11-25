@@ -1,7 +1,7 @@
 import axios from "axios";
 import { getToken, setToken, signalLogout } from "./auth";
 
-const BASE = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "");
+export const BASE = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "");
 
 export const api = axios.create({ baseURL: `${BASE}/api` });
 
