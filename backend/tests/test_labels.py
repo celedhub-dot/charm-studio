@@ -130,4 +130,17 @@ check(b and b.x0 > 300 and b.y0 > 600, "unknown A4 layout falls back to the chos
 out = pymupdf.open(stream=server.build_label_pdf(src, [None], "bottom-right", 8), filetype="pdf")
 check("CUSTOMISATION" not in out[0].get_text() and out.page_count == 1, "skipped pages stay, without a box")
 
+print("Matching a label to a saved order")
+saved = [{"id": "a", "order_id": "346654813867976704"}, {"id": "b", "order_id": "OD439161640237637100"},
+         {"id": "c", "order_id": "346653638624478272_1"}, {"id": "d", "order_id": "346653638624478272"}]
+m = server.match_orders(["346654813867976704_1"], saved)
+check([o["id"] for o in m] == ["a"] and server.label_status(["346654813867976704_1"], m) == "matched",
+      "label _1 matches an order saved without _1 (Meesho customers often leave it off)")
+m = server.match_orders(["346653638624478272_1"], saved)
+check([o["id"] for o in m] == ["c"], "an exact _1 match wins over the plain number")
+m = server.match_orders(["346654813867976705_1"], saved)
+check(m == [] and server.label_status(["346654813867976705_1"], m) == "not_found", "one wrong digit still matches nobody")
+check(server.match_orders(["346654813867976704_2"], saved)[0]["id"] == "a", "_2 label of the same purchase order finds it too")
+check(server.match_orders(["OD439161640237637101"], saved) == [], "Flipkart OD: exact only")
+
 print(f"\nALL {passed} CHECKS PASSED")

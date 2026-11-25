@@ -174,6 +174,11 @@ function ConversationList({
                   {c.name && <div className="truncate font-mono text-[11px] text-muted">{fmtPhone(c.customer_phone)}</div>}
                   <div className="mt-0.5 flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[13px] text-[#667781]">{c.last_preview}</span>
+                    {c.customer_phone?.startsWith("g-") && (
+                      <span className="shrink-0 rounded bg-[#E9EDEF] px-1.5 py-0.5 text-[10px] font-medium text-[#54656F]" title="Group: read-only, the bot never reads or replies" aria-label="Group">
+                        Group
+                      </span>
+                    )}
                     {c.saved_contact && (
                       <span className="shrink-0 rounded bg-[#E9EDEF] px-1.5 py-0.5 text-[10px] font-medium text-[#54656F]" title="Saved contact: the bot doesn't reply or read" aria-label="Saved contact">
                         Saved
@@ -237,7 +242,8 @@ function StatusTick({ m }) {
 
 // Messages from the same side (and same sender) within a few minutes are grouped: only the first gets a tail.
 const sameGroup = (a, b) =>
-  a && b && a.direction === b.direction && a.source === b.source && fmtDay(a.created_at) === fmtDay(b.created_at) &&
+  a && b && a.direction === b.direction && a.source === b.source && (a.sender || "") === (b.sender || "") &&
+  fmtDay(a.created_at) === fmtDay(b.created_at) &&
   new Date(b.created_at) - new Date(a.created_at) < 5 * 60 * 1000;
 
 function MessageList({ messages, namePrefix }) {
@@ -273,6 +279,11 @@ function MessageList({ messages, namePrefix }) {
                   m.status === "failed" && "ring-1 ring-danger/40"
                 )}
               >
+                {!out && m.sender && first && (
+                  <div className="mb-0.5 text-[12px] font-medium text-[#A2481F]" data-testid="msg-sender">
+                    {m.sender_name || `+${m.sender}`}
+                  </div>
+                )}
                 {out && src && first && (
                   <div className="mb-0.5 flex items-center gap-1 text-[12px] font-medium text-[#1F7A4D]">
                     <src.icon size={12} /> {src.label}
@@ -523,7 +534,8 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
   const { contact, messages, number } = thread;
   const left = hoursLeft(contact.window_closes_at);
   const lateReply = !contact.window_open && !!number.late_reply; // typed replies go out as the late-reply template
-  const canReply = number.can_send && (contact.window_open || lateReply);
+  const group = contact.customer_phone?.startsWith("g-");
+  const canReply = !group && number.can_send && (contact.window_open || lateReply);
 
   const pickFile = (f) => {
     if (!f) return;
@@ -584,19 +596,20 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
               <div className="truncate text-[16px] text-[#111b21]">{contact.name || fmtPhone(contact.customer_phone)}</div>
               <div className="truncate text-[12.5px] text-[#667781]">
                 {contact.name ? `${fmtPhone(contact.customer_phone)} · ` : ""}via {contact.number_label}
-                {number.bot_mode && ` · bot: ${number.bot_mode === "read" ? "reads & saves orders" : number.bot_mode === "ask" ? "asks questions" : "off"}`}
+                {group && " · read-only, the bot stays out"}
+                {number.bot_mode && !group && ` · bot: ${number.bot_mode === "read" ? "reads & saves orders" : number.bot_mode === "ask" ? "asks questions" : "off"}`}
                 <span className="hidden md:inline"> · click for contact info</span>
               </div>
             </div>
           </button>
-          <Badge
+          {!group && <Badge
             variant={contact.window_open ? "default" : "neutral"}
             className={cn("hidden shrink-0", panel === "info" ? "2xl:inline-flex" : "sm:inline-flex")}
             data-testid="reply-window-badge"
           >
             <Clock size={11} /> {contact.window_open ? `Reply window ${left >= 1 ? `${Math.floor(left)}h` : `${Math.ceil(left * 60)}m`} left` : "Reply window closed"}
-          </Badge>
-          <button
+          </Badge>}
+          {!group && <button
             type="button"
             className={cn("relative rounded-full p-2 text-[#54656F] hover:bg-black/5", panel === "orders" && "bg-black/5")}
             onClick={() => setPanel((p) => (p === "orders" ? null : "orders"))}
@@ -608,7 +621,7 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
             {thread.orders.length > 0 && (
               <span className="absolute right-0.5 top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-forest px-1 text-[9px] font-bold text-white">{thread.orders.length}</span>
             )}
-          </button>
+          </button>}
           <button
             type="button"
             className={cn("rounded-full p-2 text-[#54656F] hover:bg-black/5", panel === "info" && "bg-black/5")}
@@ -625,6 +638,11 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
           <MessageList messages={messages} namePrefix={thread.orders[0]?.order_id || ""} />
         </div>
 
+        {group ? (
+          <div className="bg-[#F0F2F5] px-4 py-3 text-center text-xs text-muted" data-testid="group-readonly-note">
+            This group was copied from the phone app, so it's read-only here. The bot never reads or replies in groups.
+          </div>
+        ) : (
         <form onSubmit={send} className="bg-[#F0F2F5] px-3 py-2.5" data-testid="reply-form">
           {!number.can_send ? (
             <p className="text-xs text-muted">This number is paused or not set up for sending. Check Settings → WhatsApp numbers.</p>
@@ -737,6 +755,7 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
             </button>
           </div>
         </form>
+        )}
       </div>
 
       {/* Orders: side panel on wide screens, toggle on smaller ones */}
@@ -748,7 +767,7 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
           panel ? "block" : "hidden xl:block"
         )}
       >
-        {panel === "info" ? (
+        {panel === "info" || group ? (
           <ContactInfo
             thread={thread}
             onClose={() => setPanel(null)}

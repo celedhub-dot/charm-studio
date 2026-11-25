@@ -1701,7 +1701,13 @@ def match_orders(detected: List[str], orders: List[Dict[str, Any]]) -> List[Dict
         return value.strip().upper().replace("-", "_")
 
     keys = {key(value) for value in detected if value.strip()}
-    return [order for order in orders if key(order.get("order_id") or "") in keys]
+    exact = [order for order in orders if key(order.get("order_id") or "") in keys]
+    if exact:
+        return exact
+    # Meesho customers often send the purchase-order number without the "_1" sub-order ending that the label
+    # prints. Accept a saved order whose ID is exactly that number (every digit equal; no fuzzy matching).
+    bases = {k.rsplit("_", 1)[0] for k in keys if re.fullmatch(r"\d{12,}_\d+", k)}
+    return [order for order in orders if key(order.get("order_id") or "") in bases]
 
 
 def label_status(detected, matches):
@@ -2794,10 +2800,22 @@ async def is_saved_contact(phone: str) -> bool:
     return bool(phone) and bool(await db().fetchval("SELECT 1 FROM saved_contacts WHERE phone = $1", phone))
 
 
+GROUP_PREFIX = "g-"  # group chats (imported from the phone app) are keyed "g-<group id>", never a phone number
+
+
+def is_group_chat(phone: str) -> bool:
+    return (phone or "").startswith(GROUP_PREFIX)
+
+
+async def bot_stays_out(phone: str) -> bool:
+    """Groups and saved contacts: the bot never replies there and never reads those chats."""
+    return is_group_chat(phone) or await is_saved_contact(phone)
+
+
 async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     biz = cfg["logical_id"]
-    if await is_saved_contact(customer):
-        return  # saved contact: never reply, never read
+    if await bot_stays_out(customer):
+        return  # group or saved contact: never reply, never read
     conv = await db().fetchrow(
         "SELECT step, fields FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2",
         biz,
@@ -3006,6 +3024,8 @@ async def save_extracted_order(label: str, customer: str, row: Dict[str, str]) -
 
 
 async def read_order_details(label: str, customer: str) -> Dict[str, Any]:
+    if is_group_chat(customer):
+        return {"orders": [], "used_ai": False, "group": True}  # group chats are never read
     if await is_saved_contact(customer):
         return {"orders": [], "used_ai": False, "saved_contact": True}  # saved contacts' chats are never read
     """Read the customer's recent messages and save any orders found (AI if configured, else order-ID patterns)."""
@@ -3170,8 +3190,8 @@ async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
         await record_message(label, customer, "in", kind, text, msg["id"], "received", "customer",
                              name=names.get(customer, ""), at=_msg_time(msg), media=message_media(msg))
         mode = cfg.get("bot_mode") or "ask"
-        if await is_saved_contact(customer):
-            continue  # saved contact: stored in Chats only; the bot never replies or reads
+        if msg.get("group_id") or await bot_stays_out(customer):
+            continue  # group message or saved contact: stored in Chats only; the bot never replies or reads
         if mode == "read" and kind in ("image", "video", "document") and text.strip():
             await schedule_read(label, customer)  # a photo's caption can carry the order details
             continue
@@ -3725,11 +3745,18 @@ async def _thread(label: str, phone: str) -> Dict[str, Any]:
         label, phone,
     )
     cfg = next((c for c in WA_ALL if c["logical_id"] == label), None)
+    out_messages = [row_dict(m) for m in messages]
+    senders = sorted({m.get("sender") for m in out_messages if m.get("sender")})
+    if senders:  # group chat: show a saved contact's name instead of the number
+        names = {r["phone"]: r["name"] for r in await db().fetch(
+            "SELECT phone, name FROM saved_contacts WHERE phone = ANY($1::text[]) AND name <> ''", senders)}
+        for m in out_messages:
+            m["sender_name"] = names.get(m.get("sender") or "", "")
     return {
         "stats": row_dict(stats),
         "contact": conversation_public(contact),
-        "messages": [row_dict(m) for m in messages],
-        "orders": [row_dict(o) for o in orders] if permitted("orders") else [],
+        "messages": out_messages,
+        "orders": [row_dict(o) for o in orders] if permitted("orders") and not is_group_chat(phone) else [],
         "number": {
             "label": label,
             "exists": bool(cfg),
@@ -3768,7 +3795,8 @@ async def customer_data(phone: str = "", order_id: str = "", missing: str = "", 
             SELECT d.label,d.phone,'',d.at,d.key,d.details,false FROM data d
             WHERE NOT EXISTS (SELECT 1 FROM wa_contacts c WHERE (c.number_label,c.customer_phone)=(d.label,d.phone))
         )
-        SELECT *, ARRAY(SELECT field FROM unnest(ARRAY['order_id','product_name','charm']) field
+        SELECT *, count(*) OVER () AS total_rows,
+               ARRAY(SELECT field FROM unnest(ARRAY['order_id','product_name','charm']) field
                         WHERE coalesce(trim(details->>field),'')='') AS missing_fields
         FROM records WHERE strpos(phone,$1)>0 AND strpos(lower(coalesce(details->>'order_id','')),lower($2))>0
           AND ($3='' OR ($3='any' AND (coalesce(details->>'order_id','')='' OR
@@ -3779,7 +3807,15 @@ async def customer_data(phone: str = "", order_id: str = "", missing: str = "", 
                           WHERE nullif(trim(details->>h.field),'') IS NULL)
         ORDER BY at DESC,label,phone,key LIMIT 51 OFFSET $6
     """, phone.strip(), order_id.strip(), missing, since, until, offset, required)
-    return {"rows": [row_dict(r) for r in rows[:50]], "more": len(rows) > 50}
+    total = int(rows[0]["total_rows"]) if rows else 0
+    if not rows and offset:  # past the last page: still report how many there are
+        total = None
+    out = []
+    for r in rows[:50]:
+        d = row_dict(r)
+        d.pop("total_rows", None)
+        out.append(d)
+    return {"rows": out, "more": len(rows) > 50, "total": total, "page_size": 50}
 
 
 @api.get("/inbox/conversations/{label}/{phone}")
@@ -3910,6 +3946,8 @@ async def inbox_chat_state(label: str, phone: str, payload: ChatStateIn):
     if payload.unread is not None:
         sets.append("unread = GREATEST(unread, 1)" if payload.unread else "unread = 0")
     if payload.saved is not None:
+        if is_group_chat(phone):
+            raise HTTPException(400, "A group can't be a saved contact. The bot already stays out of groups.")
         exists = await db().fetchval("SELECT name FROM wa_contacts WHERE number_label=$1 AND customer_phone=$2", label, phone)
         if exists is None:
             raise HTTPException(404, "No chat with this customer on that number.")
@@ -4124,6 +4162,8 @@ def sending_number(label: str) -> Dict[str, Any]:
 
 
 def clean_recipient(to: str) -> str:
+    if is_group_chat((to or "").strip()):
+        raise HTTPException(400, "Group chats are read-only here. Reply to the group from the WhatsApp app.")
     to = re.sub(r"\D", "", to or "")
     if not 8 <= len(to) <= 15:
         raise HTTPException(400, "Enter the customer's number with country code, e.g. 919876543210.")
@@ -4438,19 +4478,25 @@ async def inbox_export_chat(label: str, phone: str, media: bool = False, tz: Opt
         raise HTTPException(404, "No chat with this customer on that number.")
     tz_minutes = tz if tz is not None and -720 <= tz <= 840 else int(SHOP_UTC_OFFSET.total_seconds() // 60)
     rows = await db().fetch(
-        "SELECT id, direction, kind, body, status, created_at, media_id, media_mime, media_name FROM wa_messages "
+        "SELECT id, direction, kind, body, status, created_at, media_id, media_mime, media_name, sender FROM wa_messages "
         "WHERE number_label = $1 AND customer_phone = $2 AND status <> 'failed' ORDER BY created_at, id",
         label, phone,
     )
-    customer = contact["name"] or f"+{phone}"
+    customer = contact["name"] or (f"+{phone}" if not is_group_chat(phone) else "Group")
     shop = (SETTINGS.get("shop") or {}).get("shop_name") or label
+    saved_names = {r["phone"]: r["name"] for r in await db().fetch("SELECT phone, name FROM saved_contacts WHERE name <> ''")}
     cfg = next((c for c in WA_ALL if c["logical_id"] == label and c["token"]), None)
 
     lines: List[str] = []
     files: List[tuple] = []  # (name in zip, bytes)
     total, counter = 0, 0
     for m in rows:
-        who = customer if m["direction"] == "in" else shop
+        if m["direction"] != "in":
+            who = shop
+        elif m["sender"]:  # group message: who in the group sent it
+            who = saved_names.get(m["sender"]) or f"+{m['sender']}"
+        else:
+            who = customer
         caption = m["body"] if m["body"] and m["body"] != m["media_name"] else ""
         if m["media_id"]:
             text = "<Media omitted>"

@@ -24,7 +24,8 @@ import { useMediaUrl } from "./MessageMedia";
 import ExportChatDialog from "./ExportChatDialog";
 import { cn, timeAgo } from "../lib/utils";
 
-export const fmtPhone = (p) => (p ? `+${p}` : "");
+export const isGroup = (p) => (p || "").startsWith("g-"); // group chats imported from the phone app
+export const fmtPhone = (p) => (isGroup(p) ? "Group chat" : p ? `+${p}` : "");
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" }) : "-");
 
 // Soft colours for the initial-letter avatars: the same customer always gets the same colour.
@@ -160,13 +161,18 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
             {name || fmtPhone(phone)}
           </div>
           <div className="mt-1 font-mono text-[15px] text-muted">{fmtPhone(phone)}</div>
-          {name && <div className="mt-0.5 text-[11px] text-muted">Name from the customer's WhatsApp profile</div>}
+          {name && !isGroup(phone) && <div className="mt-0.5 text-[11px] text-muted">Name from the customer's WhatsApp profile</div>}
+          {isGroup(phone) && (
+            <div className="mt-2 rounded-full bg-[#E9EDEF] px-3 py-1 text-[11px] font-medium text-[#54656F]" data-testid="contact-info-group">
+              Group from the phone app: read-only here, and the bot never reads or replies
+            </div>
+          )}
           {contact.saved_contact && (
             <div className="mt-2 rounded-full bg-[#E9EDEF] px-3 py-1 text-[11px] font-medium text-[#54656F]" data-testid="contact-info-saved">
               Saved contact: the bot doesn't reply or read this chat
             </div>
           )}
-          <div className="mt-5 grid w-full grid-cols-4 gap-2">
+          {!isGroup(phone) && <div className="mt-5 grid w-full grid-cols-4 gap-2">
             {[
               { icon: Copy, label: "Copy", onClick: () => copy(fmtPhone(phone), "Number"), testId: "info-copy" },
               { icon: WhatsappLogo, label: "WhatsApp", href: `https://wa.me/${phone}`, testId: "info-wa" },
@@ -187,7 +193,7 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
                 </button>
               );
             })}
-          </div>
+          </div>}
           <p className="mt-4 text-[11px] leading-snug text-muted">
             WhatsApp doesn't share customers' profile photos, About or last seen with business apps, so those can't be shown here.
           </p>
@@ -195,18 +201,20 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
 
         <Section title="This chat" testId="info-chat">
           <Row icon={DeviceMobile} label="Business number" value={contact.number_label} />
-          <Row icon={Robot} label="Bot on this number" value={bot} />
-          <Row
-            icon={Clock}
-            label="Reply window"
-            value={contact.window_open ? `Open: ${left >= 1 ? `${Math.floor(left)}h` : `${Math.ceil(left * 60)}m`} left for typed replies` : "Closed: send a template"}
-          />
+          <Row icon={Robot} label="Bot on this number" value={isGroup(phone) ? "Stays out of groups" : bot} />
+          {!isGroup(phone) && (
+            <Row
+              icon={Clock}
+              label="Reply window"
+              value={contact.window_open ? `Open: ${left >= 1 ? `${Math.floor(left)}h` : `${Math.ceil(left * 60)}m`} left for typed replies` : "Closed: send a template"}
+            />
+          )}
           <Row icon={CalendarBlank} label="First message" value={fmtDate(stats.first_message_at)} />
           <Row
             icon={ChatCircleText}
             label="Messages"
-            value={`${stats.messages ?? messages.length} in total, ${stats.from_customer ?? "-"} from the customer`}
-            sub={contact.last_inbound_at ? `Customer last wrote ${timeAgo(contact.last_inbound_at)}` : "Messages"}
+            value={`${stats.messages ?? messages.length} in total, ${stats.from_customer ?? "-"} from ${isGroup(phone) ? "members" : "the customer"}`}
+            sub={contact.last_inbound_at ? `${isGroup(phone) ? "A member" : "Customer"} last wrote ${timeAgo(contact.last_inbound_at)}` : "Messages"}
           />
         </Section>
 

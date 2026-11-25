@@ -21,7 +21,7 @@ import ExportChatDialog from "./ExportChatDialog";
 import { setChatState, clearChat, deleteChat, errorMessage } from "../lib/api";
 import { cn } from "../lib/utils";
 
-const fmtPhone = (p) => (p ? `+${p}` : "");
+const fmtPhone = (p) => ((p || "").startsWith("g-") ? "this group" : p ? `+${p}` : "");
 const MENU_W = 216;
 
 /** The ⋮ menu on a chat in the list: archive, mute, pin, read/unread, clear, delete. */
@@ -114,7 +114,9 @@ export default function ChatMenu({ chat, onChanged, onDeleted, onMarkedUnread })
     chat.unread > 0
       ? { icon: CheckCircle, label: "Mark as read", run: () => change({ unread: false }) }
       : { icon: ChatCircleDots, label: "Mark as unread", run: () => change({ unread: true }) },
-    chat.saved_contact
+    (chat.customer_phone || "").startsWith("g-")
+      ? null // groups: the bot already stays out
+      : chat.saved_contact
       ? { icon: AddressBook, label: "Remove from saved contacts", run: () => change({ saved: false }, "Removed: the bot treats this number as a customer again") }
       : { icon: AddressBook, label: "Mark as saved contact", run: () => change({ saved: true }, "Saved contact: the bot won't reply or read this chat") },
     { icon: Export, label: "Export chat", run: () => ask("export") },

@@ -75,7 +75,7 @@ export default function CustomerData() {
       </div>
       <div className="mt-3 flex items-center gap-4">
         <button disabled={!offset} onClick={() => setOffset(offset-50)}>Previous</button>
-        <span>Page {offset / 50 + 1}</span>
+        <span>Page {offset / 50 + 1}{result.total != null && ` of ${Math.max(1, Math.ceil(result.total / 50))}`}{result.total != null && ` · ${result.total.toLocaleString()} records`}</span>
         <button disabled={!result.more} onClick={() => setOffset(offset+50)}>Next</button>
       </div>
     </>}

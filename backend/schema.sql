@@ -187,3 +187,7 @@ CREATE TABLE IF NOT EXISTS saved_contacts (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE saved_contacts ENABLE ROW LEVEL SECURITY;
+
+-- Group chats imported from the phone app (read-only; the bot never reads or replies there)
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS chat_kind text NOT NULL DEFAULT 'direct';
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS sender text NOT NULL DEFAULT '';
