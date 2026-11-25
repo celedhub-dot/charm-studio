@@ -103,6 +103,9 @@ export const getStats = () => api.get("/stats").then((r) => r.data);
 
 // AI
 export const getExtractOptions = () => api.get("/extract/options").then((r) => r.data);
+// Owner only: the WhatsApp Extract model/effort everyone gets by default ("" = server setting)
+export const saveAiDefaults = (extract_model, extract_effort) =>
+  api.put("/settings/ai", { extract_model, extract_effort }).then((r) => r.data);
 // ai = { model, effort }; empty strings mean "use the server's default"
 export const extractText = (text, ai = {}) =>
   api.post("/extract", { text, model: ai.model || null, effort: ai.effort || null }).then((r) => r.data);

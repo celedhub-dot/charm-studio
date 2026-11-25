@@ -1,6 +1,6 @@
 """Check which Claude model each AI job uses (no real AI calls; nothing is billed).
 
-WhatsApp Extract should use ANTHROPIC_EXTRACT_MODEL (default claude-sonnet-5-5) and the WhatsApp bots should use
+WhatsApp Extract should use ANTHROPIC_EXTRACT_MODEL (default claude-haiku-5-5, medium effort; the owner can change it) and the WhatsApp bots should use
 ANTHROPIC_MODEL (here claude-haiku-5-5), with options each model accepts: effort on both, server-side refusal
 fallbacks only on Sonnet (Haiku 5.5 has none).
 
@@ -20,6 +20,7 @@ sys.path.insert(0, str(BACKEND))
 load_dotenv(BACKEND / ".env")
 os.environ.update({"AI_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "sk-ant-test-not-real", "ANTHROPIC_MODEL": "claude-haiku-5-5"})
 os.environ.pop("ANTHROPIC_EXTRACT_MODEL", None)
+os.environ.pop("ANTHROPIC_EXTRACT_EFFORT", None)
 
 import server  # noqa: E402
 
@@ -49,12 +50,17 @@ def check(cond, label, extra=""):
 
 
 async def main():
-    check(server.AI_MODEL == "claude-haiku-5-5" and server.EXTRACT_MODEL == "claude-sonnet-5-5", "models from settings: bot Haiku, Extract Sonnet")
+    check(server.AI_MODEL == "claude-haiku-5-5" and server.EXTRACT_MODEL == "claude-haiku-5-5" and server.EXTRACT_EFFORT == "medium",
+          "models from settings: bot Haiku, Extract Haiku medium")
 
     print("WhatsApp Extract")
+    await server.extract(server.ExtractIn(text="Riya: order 123456789012_1, print AARAV, heart charm"))
+    c = calls[-1]
+    check(c["model"] == "claude-haiku-5-5" and c["extra_body"].get("output_config") == {"effort": "medium"}, "Extract runs on Haiku medium by default", c["model"])
+    server.EXTRACT_MODEL = "claude-sonnet-5-5"
     res = await server.extract(server.ExtractIn(text="Riya: order 123456789012_1, print AARAV, heart charm"))
     c = calls[-1]
-    check(c["model"] == "claude-sonnet-5-5", "Extract runs on Sonnet", c["model"])
+    check(c["model"] == "claude-sonnet-5-5", "Extract runs on Sonnet when the server says so", c["model"])
     check(c["extra_body"].get("fallbacks") == "default" and "server-side-fallback-2026-07-01" in c["betas"], "Sonnet gets refusal fallbacks")
     check(res["orders"][0]["product_name"] == "AARAV", "Extract result parsed")
 

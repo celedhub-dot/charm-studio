@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 import { Sparkle, FileText, UploadSimple, FloppyDisk, ChatText, Stack, CopySimple, Brain } from "@phosphor-icons/react";
-import { extractText, extractFile, getExtractOptions, bulkOrders, errorMessage } from "../lib/api";
+import { extractText, extractFile, getExtractOptions, saveAiDefaults, bulkOrders, errorMessage } from "../lib/api";
 import { PageHeader, EditableRows } from "../components/common";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, Textarea, Spinner, Alert, Label } from "../components/ui/primitives";
 import { Tabs, TabsList, TabsTrigger, TabsContent, SimpleSelect } from "../components/ui/overlays";import { Button } from "../components/ui/button";
@@ -68,10 +68,13 @@ function savePref(v) {
 /** Lets staff pick the Claude model and effort for this extraction. value = { model, effort } ("" = server default). */
 function AiPicker({ value, onChange }) {
   const [opts, setOpts] = useState(null);
-  useEffect(() => {
+  const [savingDefault, setSavingDefault] = useState(false);
+  const loadOpts = () =>
     getExtractOptions()
       .then(setOpts)
       .catch(() => setOpts({ provider: "unknown", models: [], efforts: [], default: {} }));
+  useEffect(() => {
+    loadOpts();
   }, []);
   if (!opts) return null;
   if (opts.provider === "ollama") {
@@ -93,6 +96,22 @@ function AiPicker({ value, onChange }) {
     savePref(next);
     onChange(next);
   };
+  // What this device would actually send, compared with the team default
+  const differs = !!value.model && (value.model !== def.model || (value.effort || "") !== (def.effort || ""));
+  const makeDefault = async () => {
+    setSavingDefault(true);
+    try {
+      await saveAiDefaults(model, effort);
+      await loadOpts();
+      savePref({});
+      onChange({ model: "", effort: "" }); // this device now follows the team default too
+      toast.success(`Default for everyone is now ${shortName(model, opts.models)}${effort ? `, ${effort} effort` : ""}`);
+    } catch (e) {
+      toast.error(errorMessage(e));
+    } finally {
+      setSavingDefault(false);
+    }
+  };
 
   return (
     <div className="mb-5 rounded-2xl border border-line bg-white p-4" data-testid="extract-ai-picker">
@@ -113,6 +132,17 @@ function AiPicker({ value, onChange }) {
             {cost != null ? `About ₹${cost < 1 ? cost.toFixed(2) : Math.round(cost)} for a big chat file (~500 messages); short pastes cost much less.` : ""}
           </p>
         </div>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted" data-testid="extract-ai-active">
+        <span>
+          Next extraction uses <b className="text-ink">{shortName(model, opts.models)}{effort ? `, ${effort} effort` : ""}</b>
+          {differs ? " (your choice on this device)" : " (default for everyone)"}.
+        </span>
+        {differs && opts.can_set_default && (
+          <Button size="sm" variant="outline" onClick={makeDefault} disabled={savingDefault} data-testid="extract-make-default">
+            {savingDefault ? "Saving…" : "Make this the default for everyone"}
+          </Button>
+        )}
       </div>
     </div>
   );

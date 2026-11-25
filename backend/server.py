@@ -173,6 +173,7 @@ def active_numbers() -> List[Dict[str, Any]]:
     return [c for c in WA_ALL if c["active"] and c["token"]]
 
 DEFAULT_SETTINGS: Dict[str, Dict[str, Any]] = {
+    "ai": {"extract_model": "", "extract_effort": ""},  # WhatsApp Extract default for everyone ("" = server setting)
     "shop": {"shop_name": ""},
     "bot": {
         "ask_order_id": "Hi! Please send your Order ID.",
@@ -1370,14 +1371,14 @@ if AI_PROVIDER not in ("anthropic", "ollama"):
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "").strip() or "claude-haiku-5-5"  # the WhatsApp bots
 # WhatsApp Extract (bulk chats, corrections, several orders per chat) is worth a stronger model; the bots
 # read short chats all day, where the cheaper ANTHROPIC_MODEL (e.g. claude-haiku-5-5) is enough.
-ANTHROPIC_EXTRACT_MODEL = os.environ.get("ANTHROPIC_EXTRACT_MODEL", "").strip() or "claude-sonnet-5-5"
+ANTHROPIC_EXTRACT_MODEL = os.environ.get("ANTHROPIC_EXTRACT_MODEL", "").strip() or "claude-haiku-5-5"
 OLLAMA_BASE_URL = (os.environ.get("OLLAMA_BASE_URL", "").strip() or "https://ollama.com").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "").strip()
 AI_MODEL = OLLAMA_MODEL if AI_PROVIDER == "ollama" else ANTHROPIC_MODEL
 EXTRACT_MODEL = OLLAMA_MODEL if AI_PROVIDER == "ollama" else ANTHROPIC_EXTRACT_MODEL
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Optional thinking effort for WhatsApp Extract (e.g. "high" makes a cheap Haiku think harder); blank = model default.
-EXTRACT_EFFORT = os.environ.get("ANTHROPIC_EXTRACT_EFFORT", "").strip().lower() or None
+EXTRACT_EFFORT = os.environ.get("ANTHROPIC_EXTRACT_EFFORT", "").strip().lower() or "medium"
 if EXTRACT_EFFORT and EXTRACT_EFFORT not in EFFORTS:
     raise RuntimeError(f"ANTHROPIC_EXTRACT_EFFORT must be one of {', '.join(EFFORTS)}, got '{EXTRACT_EFFORT}'")
 AI_USAGE: List[Dict[str, Any]] = []  # recent calls' token usage (model, input, output); handy for cost checks
@@ -1560,18 +1561,29 @@ EXTRACT_CHOICES = {
 }
 
 
+def extract_default() -> tuple:
+    """The team-wide WhatsApp Extract default: the owner's saved choice, else the server's setting."""
+    saved = SETTINGS.get("ai") or {}
+    model = saved.get("extract_model") or ""
+    if model not in EXTRACT_CHOICES:
+        return EXTRACT_MODEL, EXTRACT_EFFORT
+    effort = saved.get("extract_effort") or ""
+    return model, (effort if effort in EFFORTS else None)
+
+
 def extract_settings(model: Optional[str], effort: Optional[str]) -> tuple:
-    """The (model, effort) to use for one extraction, from the page's choice or the server defaults."""
+    """The (model, effort) to use for one extraction, from the page's choice or the team default."""
     if AI_PROVIDER == "ollama":
         return EXTRACT_MODEL, None
-    model = (model or "").strip() or EXTRACT_MODEL
+    def_model, def_effort = extract_default()
+    model = (model or "").strip() or def_model
     if model not in EXTRACT_CHOICES and model != EXTRACT_MODEL:
         raise HTTPException(400, f"Unknown model '{model}'. Choose one of: {', '.join(EXTRACT_CHOICES)}.")
     effort = (effort or "").strip().lower() or None
     if effort and effort not in EFFORTS:
         raise HTTPException(400, f"Effort must be one of: {', '.join(EFFORTS)}.")
-    if effort is None and model == EXTRACT_MODEL:
-        effort = EXTRACT_EFFORT  # "Default" keeps the server's setting for its own model
+    if effort is None and model == def_model:
+        effort = def_effort  # "Default" effort follows the team default for that model
     return model, effort
 
 
@@ -1583,7 +1595,8 @@ async def extract_options():
     return {
         "provider": AI_PROVIDER,
         "ready": ai_ready(),
-        "default": {"model": EXTRACT_MODEL, "effort": EXTRACT_EFFORT or ""},
+        "default": dict(zip(("model", "effort"), (lambda d: (d[0], d[1] or ""))(extract_default()))),
+        "can_set_default": employee_permissions.get() is None,  # only the owner sets the team default
         "models": models,
         "efforts": list(EFFORTS),
     }
@@ -4631,6 +4644,22 @@ async def save_bot_settings(payload: BotSettingsIn):
     return await _save_section("bot", {k: v.strip() for k, v in payload.model_dump().items()})
 
 
+class AiSettingsIn(BaseModel):
+    extract_model: str = Field("", max_length=64)
+    extract_effort: str = Field("", max_length=16)
+
+
+@api.put("/settings/ai")
+async def save_ai_settings(payload: AiSettingsIn):
+    """Owner only: the WhatsApp Extract model and effort everyone gets by default."""
+    model, effort = payload.extract_model.strip(), payload.extract_effort.strip().lower()
+    if model and model not in EXTRACT_CHOICES:
+        raise HTTPException(400, f"Unknown model '{model}'. Choose one of: {', '.join(EXTRACT_CHOICES)}.")
+    if effort and effort not in EFFORTS:
+        raise HTTPException(400, f"Effort must be one of: {', '.join(EFFORTS)}.")
+    return await _save_section("ai", {"extract_model": model, "extract_effort": effort})
+
+
 @api.put("/settings/labels")
 async def save_label_settings(payload: LabelSettingsIn):
     return await _save_section("labels", payload.model_dump())
@@ -4664,7 +4693,7 @@ async def save_template_settings(payload: TemplateSettingsIn):
 @api.get("/system/status")
 async def system_status(request: Request):
     return {
-        "ai": {"provider": AI_PROVIDER, "model": AI_MODEL or "", "extract_model": EXTRACT_MODEL or "", "extract_effort": EXTRACT_EFFORT or "", "ready": ai_ready()},
+        "ai": {"provider": AI_PROVIDER, "model": AI_MODEL or "", "extract_model": extract_default()[0] or "", "extract_effort": extract_default()[1] or "", "ready": ai_ready()},
         "email_reset": {
             "configured": bool(RESEND_API_KEY),
             "sender": RESEND_FROM,
