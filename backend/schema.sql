@@ -253,3 +253,6 @@ CREATE TABLE IF NOT EXISTS team_reads (
     PRIMARY KEY (username, number_label, customer_phone)
 );
 ALTER TABLE team_reads ENABLE ROW LEVEL SECURITY;
+
+-- When the Order ID example picture was sent to this customer (sent at most once)
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS guide_sent_at timestamptz;

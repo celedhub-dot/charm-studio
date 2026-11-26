@@ -205,13 +205,17 @@ async def test_guide():
         server, "send_payload", AsyncMock(return_value=server.httpx.Response(200))
     ) as photo:
         messages, _, orders = await run(["name Riya, charm star", "where is my ID?", "123456789012_1"])
-        assert photo.await_count == 1 and photo.await_args.kwargs["text"] == server.bot_question(0)
+        # the example picture is labelled as an example, and goes only while the Order ID is missing
+        assert photo.await_count == 1 and photo.await_args.kwargs["text"] == f"{server.GUIDE_NOTE}\n\n{server.bot_question(0)}"
         assert orders[0]["product_name"] == "Riya" and orders[0]["order_id"] == "123456789012_1"
         assert messages[0] == server.bot_question(0)
-        for first in ("Hi", "order 123456789012_1 name Meera, star charm", "123456789012_1"):
+        photo.reset_mock()
+        messages, _, _ = await run(["Hi"])
+        assert photo.await_count == 1 and not messages
+        for first in ("order 123456789012_1 name Meera, star charm", "123456789012_1"):
             photo.reset_mock()
             messages, _, _ = await run([first])
-            assert photo.await_count == 1 and not messages
+            assert photo.await_count == 0 and messages  # the Order ID is already there: no example picture
         assert actual_guide.read_bytes()[:3] == bytes.fromhex("ffd8ff")
 
 asyncio.run(test_guide())

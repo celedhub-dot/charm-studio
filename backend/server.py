@@ -73,7 +73,7 @@ ORDER_COLUMNS = (
     "id, order_id, product_name, charm, notes, source, channel, created_at, customer_phone, order_date, colour, quantity"
 )
 ORDER_SELECT = ORDER_COLUMNS + ", confirmed_at"  # confirmed_at is set by sending a template, never inserted
-SOURCES = ("manual", "ai", "csv", "whatsapp")
+SOURCES = ("manual", "ai", "csv", "whatsapp", "screenshot")  # screenshot: order ID read from a photo, details still to come
 
 SCHEMA_SQL = (ROOT_DIR / "schema.sql").read_text(encoding="utf-8")
 
@@ -177,6 +177,7 @@ DEFAULT_SETTINGS: Dict[str, Dict[str, Any]] = {
     "ai": {"extract_model": "", "extract_effort": ""},  # WhatsApp Extract default for everyone ("" = server setting)
     "shop": {"shop_name": ""},
     "bot": {
+        "knowledge": "",
         "ask_order_id": "Hi! Please send your Order ID.",
         "ask_product_name": "What name should we print on the product?",
         "ask_charm": "Which charm would you like?",
@@ -874,7 +875,7 @@ def build_order(data: Dict[str, Any]) -> Dict[str, Any]:
         source = "manual"
     return {
         "id": str(uuid.uuid4()),
-        "order_id": str(data.get("order_id") or "").strip(),
+        "order_id": re.sub(r"\s+", "", str(data.get("order_id") or "")).lstrip("#"),  # "#3571 2345..." -> "35712345..."
         "product_name": str(data.get("product_name") or "").strip(),
         "charm": str(data.get("charm") or "").strip(),
         "notes": str(data.get("notes") or "").strip(),
@@ -2487,7 +2488,7 @@ async def screenshots_test(limit: int = 12, compare: bool = False):
                     elif is_group_chat(r["customer_phone"]) or await is_saved_contact(r["customer_phone"]):
                         out["saved"] = "not saved (group or saved contact)"
                     else:
-                        await save_extracted_order(r["number_label"], r["customer_phone"], {"order_id": oid})
+                        await save_extracted_order(r["number_label"], r["customer_phone"], {"order_id": oid, "source": "screenshot"})
                         out["saved"] = "saved to customer data"
                     await db().execute("UPDATE wa_messages SET ai_note=$2 WHERE id=$1 AND ai_note=''", r["id"],
                                        f"{SCREENSHOT_NOTE}: Order ID {oid}" + (f" | Product: {found['product']}" if found.get("product") else "")
@@ -2565,6 +2566,9 @@ async def read_new_screenshots(cfg: Dict[str, Any], label: str, customer: str, s
             note = f"{SCREENSHOT_NOTE}: order page, but the Order ID isn't readable" + (f" | Product: {got['product']}" if got.get("product") else "")
         await db().execute("UPDATE wa_messages SET ai_note=$2 WHERE id=$1", r["id"], note[:400])
         if got and got.get("order_id"):
+            if not await bot_stays_out(customer):  # saved now (ID only); the name/charm are filled in when they arrive
+                await save_extracted_order(label, customer, {"order_id": got["order_id"], "quantity": got.get("quantity", ""),
+                                                            "source": "screenshot"})
             break
 
 
@@ -2585,7 +2589,11 @@ async def bot_input(cfg: Dict[str, Any], label: str, customer: str, since: datet
     return "\n".join(x for x in parts if x)
 
 
+GUIDE_NOTE = "\U0001F4CC Example picture (not your order): it shows where to find the Order ID."
+
+
 async def send_order_guide(cfg, customer, caption):
+    caption = f"{GUIDE_NOTE}\n\n{caption}"  # so customers don't take the sample product for their own order
     if len(caption) > 1024 or not ORDER_ID_GUIDE.is_file():
         return False
     try:
@@ -2598,6 +2606,9 @@ async def send_order_guide(cfg, customer, caption):
             kind="image", text=caption, source="bot",
             media={"media_id": media_id, "media_mime": "image/jpeg", "media_name": ORDER_ID_GUIDE.name},
         )
+        if response.is_success:
+            await db().execute("UPDATE wa_contacts SET guide_sent_at = now() WHERE number_label=$1 AND customer_phone=$2",
+                               cfg["logical_id"], customer)
         return response.is_success
     except (OSError, HTTPException) as exc:
         log.warning("Could not prepare Order ID guide: %s", type(exc).__name__)
@@ -2639,7 +2650,8 @@ async def chat_language(label: str, customer: str, incoming: str) -> str:
 
 _reply_translations = OrderedDict()
 _updated_order_reply = "Thank you! Your details for order {order_id} have been updated."
-_english_reply_lines = set("\n".join([*DEFAULT_SETTINGS["bot"].values(), _updated_order_reply]).splitlines())
+_english_reply_lines = set("\n".join([*(v for k, v in DEFAULT_SETTINGS["bot"].items() if k != "knowledge"), _updated_order_reply,
+                                       "Your order {order_id} is already saved.", "Updated your order {order_id}:"]).splitlines())
 _translation_preamble = re.compile(
     r"^(?:the (?:target|source) language\b|(?:here is|here's) (?:the|your) translat|"
     r"translation\s*:|translated (?:text|reply)\s*:)", re.I)
@@ -2688,7 +2700,10 @@ async def prompt_for_details(cfg, customer, fields, step, language="", answer=""
     question = await localize_reply(question, language)
     if answer:
         question = answer + "\n\n" + question
-    if not fields.get("_guide_sent") and await send_order_guide(cfg, customer, question):
+    # the Order ID example picture: only while the Order ID is missing, and at most once per customer
+    shown_before = fields.get("_guide_sent") or await db().fetchval(
+        "SELECT guide_sent_at IS NOT NULL FROM wa_contacts WHERE number_label=$1 AND customer_phone=$2", cfg["logical_id"], customer)
+    if not step_filled(fields, "order_id") and not shown_before and await send_order_guide(cfg, customer, question):
         fields["_guide_sent"] = "yes"
         await db().execute(UPSERT_CONV_SQL, cfg["logical_id"], customer, step, fields)
         return
@@ -3059,7 +3074,11 @@ BOT_TURN_SYSTEM = (
     "If a line says which items need a name (a combo), product_name must give each item, e.g. "
     "'Wallet: Aarav | Keychain: Riya | Pen: Dev'. Take a colour only when the customer asks to change or "
     "choose the colour. A code like S-400000001 is not an order ID: never return it as order_id. Lines starting "
-    "with the camera sign were read from the customer's order screenshot. Never mention prices."
+    "with the camera sign were read from the customer's order screenshot: use them for the order ID only, never as "
+    "the name, charm or colour (a product title may contain words like 'Name & Charm'). Never mention prices. "
+    "Never ask the customer for a colour. A product type ('keychain', 'doctor keychain', 'kada') or 'not applicable' "
+    "is not a charm. If asked what a charm is: it's the small design/symbol on the product, chosen by its number from "
+    "the product photos on Meesho/Flipkart."
 )
 
 STEP_ASKED = {
@@ -3103,6 +3122,8 @@ async def ai_bot_turn(text: str, asked: Optional[str], fields: Dict[str, str],
         f"Recent conversation (oldest first):\n{convo}\n\n"
         f"Next unfilled intake field (recent messages show the actual last question): {STEP_ASKED.get(asked or '', 'none yet')}\n"
         f"Reply language: {language or 'infer from customer'}\n"
+        f"Shop facts (answer customer questions only from these; if a question isn't covered, say the team will confirm): "
+        f"{((SETTINGS.get('bot') or {}).get('knowledge') or 'none given').strip()[:3000]}\n"
         f"Details collected so far: {json.dumps(known, ensure_ascii=False) if known else 'nothing'}\n"
         f"{product}\n"
         f"NEW customer message(s) to read (may also appear at the end of history):\n{text}"
@@ -3166,7 +3187,7 @@ async def fill_late_details(label, customer, fields, *, corrections=()):
             del supplied["order_date"]
     async with db().acquire() as conn, conn.transaction():
         rows = await conn.fetch(
-            f"SELECT {ORDER_SELECT} FROM orders WHERE channel=$1 AND customer_phone=$2 "
+            f"SELECT {ORDER_SELECT} FROM orders WHERE channel=$1 AND customer_phone=$2 AND source <> 'screenshot' "
             "AND ($3='' OR upper(replace(trim(order_id),'-','_'))=upper(replace($3,'-','_'))) "
             "ORDER BY id LIMIT 2 FOR UPDATE", label, customer, oid)
         if len(rows) != 1:
@@ -3263,6 +3284,19 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
         await prompt_for_details(cfg, customer, fields, 0, language)
         return
 
+    # Rule: once this customer's order is saved, later messages are changes, extra instructions, questions or chat.
+    # The bot never restarts the order or asks for the Order ID again (unless they send a different ID / a new order).
+    known = await db().fetchrow(
+        f"SELECT {ORDER_SELECT} FROM orders WHERE channel=$1 AND customer_phone=$2 AND order_id NOT LIKE 'wa-%' "
+        "AND source <> 'screenshot' ORDER BY created_at DESC LIMIT 1", biz, customer)
+    conv_id = (conv["fields"] or {}).get("order_id") if conv else ""
+    other_ids = [i for i in detect_ids(cleaned) if not known or norm_id(i) != norm_id(known["order_id"])]
+    if known and not other_ids and not conv_id and not s_code and not NEW_ORDER_RE.search(cleaned):
+        if conv:  # a half-started intake after the order was saved: drop it
+            await db().execute("DELETE FROM wa_conversations WHERE business_number_id=$1 AND customer_phone=$2", biz, customer)
+        await follow_up(cfg, customer, known, cleaned, history, language)
+        return
+
     is_new = conv is None
     fields: Dict[str, str] = dict(conv["fields"] or {}) if conv else {}
     for m in re.finditer(r"Product: ([^|\n]+)", cleaned):  # read from an order screenshot
@@ -3280,10 +3314,27 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
             return  # a photo that isn't an order screenshot: nothing to answer
     step = next_step(fields)
 
-    ids = detect_ids(cleaned)  # order IDs by pattern: works with or without an AI key
+    ids = detect_ids(cleaned)  # order IDs by pattern (also from a screenshot note): works with or without an AI key
+    # the customer's own words: a screenshot note gives the order ID and product only, never the name or charm
+    said = "\n".join(ln for ln in cleaned.splitlines() if not ln.startswith(SCREENSHOT_NOTE) and ln.strip() != "[photo]").strip()
+    # Rule: an Order ID your staff typed in this chat counts (they read it from the customer's screenshot)
+    if not fields.get("order_id") and not ids:
+        for m in reversed(history):
+            staff_ids = [i for i in detect_ids(m["body"]) if FULL_ID_RE.fullmatch(i)] if m["direction"] == "out" \
+                and m.get("source") in ("staff", "phone_app") else []
+            if staff_ids:  # only a complete ID (staff sometimes type part of it first)
+                fields["order_id"] = staff_ids[0]
+                break
+    # Rule: the product can also come from the customer's own words ("CA keychain", "wallet")
+    if not fields.get("_product"):
+        for txt in [said] + [m["body"] for m in reversed(history) if m["direction"] == "in"]:
+            if txt and len(txt) < 300 and not txt.startswith(SCREENSHOT_NOTE) and cat.items_in(txt):
+                apply_product(fields, txt)
+                break
+    step = next_step(fields)
     # labelled details ("name AARAV", "charm no 5") and replies laid out like the shop's numbered list (no AI needed)
-    labelled = {**pattern_details(cleaned), **numbered_reply(cleaned, shop_menu(history))}
-    if not is_new and STEP_KEYS[step] == "notes" and set(labelled) == {"notes"} and not re.search(r"\bnotes?\b", cleaned, re.I):
+    labelled = {**pattern_details(said), **numbered_reply(said, shop_menu(history))} if said else {}
+    if not is_new and STEP_KEYS[step] == "notes" and set(labelled) == {"notes"} and not re.search(r"\bnotes?\b", said, re.I):
         labelled = {}  # answering "Any notes?": keep the whole reply ("gift wrap please"), not just the keyword
 
     def merge(found: Dict[str, str]) -> None:
@@ -3313,23 +3364,31 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     elif understood:
         if fields.get("_product") and not fields.get("_colour_ok"):
             understood.pop("colour", None)  # colour changes only for wallets, purses, clutches, passport covers
+        if fields.get("_no_charm") and "logo" not in (understood.get("charm") or "").lower():
+            understood.pop("charm", None)  # Rule: no charm on keychains, pens, bracelets... ("CA" there is part of the name)
+        if understood.get("charm") and not_a_charm(understood["charm"]):
+            understood.pop("charm")  # "Keychain", "N/A", "Doctor keychain": a product or "none", never a charm
+            if not fields.get("_product"):
+                fields["_no_charm"] = "yes"
         if S_CODE_RE.fullmatch(understood.get("order_id", "") or "x"):
             understood.pop("order_id")
         for k, v in understood.items():
             fields[k] = v  # the AI only returns what this message says, so a new value is a correction
         if ids and not fields.get("order_id"):
             fields["order_id"] = ids[0]
-    elif len(cleaned.split()) >= 6:
+    elif len(said.split()) >= 6:
         merge(labelled)
         if not labelled and not ids and not is_new and STEP_KEYS[step] == "notes":
-            fields["notes"] = cleaned[:200]  # a long answer to "Any notes?" (never a whole sentence as an ID/name/charm)
+            fields["notes"] = said[:200]  # a long answer to "Any notes?" (never a whole sentence as an ID/name/charm)
     elif any(not step_filled(fields, k) for k in labelled):
         merge(labelled)  # a short message with labelled details still missing, e.g. "name AARAV, heart charm"
     elif is_new and not re.search(r"\d", cleaned):
         pass  # first contact with a short non-ID message: just greet below
     else:
         # Plain answers. Several lines (or several quick messages read together) answer the next questions in turn.
-        for line in [ln.strip() for ln in cleaned.splitlines() if ln.strip()] or [cleaned]:
+        if not said:
+            merge({})  # only a screenshot: take its order ID
+        for line in [ln.strip() for ln in said.splitlines() if ln.strip()]:
             step = next_step(fields)
             if step >= len(STEP_KEYS):
                 break
@@ -3375,12 +3434,30 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
             "customer_phone": customer,
             "order_date": fields.get("order_date"),
         }
+        pre_id = await db().fetchval(
+            "SELECT id FROM orders WHERE channel=$1 AND customer_phone=$2 AND source='screenshot' "
+            "AND upper(regexp_replace(order_id,'[^A-Za-z0-9]','','g'))=$3 ORDER BY created_at LIMIT 1",
+            biz, customer, norm_id(base["order_id"]))
+
+        async def save_row(data):
+            nonlocal pre_id
+            if pre_id:  # the order saved from the screenshot: fill it in
+                oid, pre_id = pre_id, None
+                row = await db().fetchrow(
+                    f"UPDATE orders SET product_name=$2, charm=$3, notes=$4, colour=$5, "
+                    f"quantity=CASE WHEN $6 <> '' THEN $6 ELSE quantity END, order_date=COALESCE($7, order_date), source='whatsapp' "
+                    f"WHERE id=$1 RETURNING {ORDER_SELECT}",
+                    oid, data["product_name"], data["charm"], data["notes"], data["colour"], data["quantity"],
+                    parse_order_date(data.get("order_date")) if data.get("order_date") else None)
+                return row_dict(row)
+            return await insert_order(data)
+
         names = combo_names(fields) if fields.get("_items") else {}
         if names:  # a combo: one row per item, same order ID, so each item's name prints on the label
             saved_rows = []
             for item in fields["_items"].split(","):
                 needs_charm = cat.NEEDS.get(item, (True, True))[1] or item in cat.LOGO_OK
-                saved_rows.append(await insert_order({
+                saved_rows.append(await save_row({
                     **base, "product_name": names.get(item, ""), "charm": base["charm"] if needs_charm else "",
                     "colour": base["colour"] if item in cat.COLOUR_CHANGE_OK else "",
                     "notes": "; ".join(filter(None, (f"Item: {item_label(item)}", base["notes"]))),
@@ -3389,7 +3466,7 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
             order["product_name"] = " | ".join(f"{item_label(i)}: {names.get(i, '')}" for i in fields["_items"].split(","))
             order["notes"] = base["notes"]
         else:
-            order = await insert_order(base)
+            order = await save_row(base)
         await db().execute(
             "DELETE FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2", biz, customer
         )
@@ -3413,8 +3490,7 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
         )
         if answer:
             summary = answer + "\n\n" + summary
-        if fields.get("_guide_sent") or not await send_order_guide(cfg, customer, summary):
-            await send_wa(cfg, customer, summary)
+        await send_wa(cfg, customer, summary)  # never the example picture with the saved summary
         return
 
     if s_code and not fields.get("order_id"):
@@ -3422,6 +3498,79 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
         fields.pop("_guide_sent", None)  # show the Order ID picture again
     await db().execute(UPSERT_CONV_SQL, biz, customer, step, fields)
     await prompt_for_details(cfg, customer, fields, step, language, answer)
+
+
+FULL_ID_RE = re.compile(r"OD\d{15,21}|\d{15,20}(?:_\d{1,2})?", re.I)  # complete Flipkart / Meesho order IDs
+_NO_CHARM_WORDS = re.compile(r"^(?:n/?a|na|nil|none|no|not\s*applicable|not\s*required|not\s*needed|no\s*charm|without\s*charm|-+|nahi|nhi)$", re.I)
+
+
+def not_a_charm(value: str) -> bool:
+    """'N/A', 'Not applicable', 'Keychain', 'Doctor keychain', 'kada': not a charm choice."""
+    v = re.sub(r"[.!]+$", "", (value or "").strip())
+    if _NO_CHARM_WORDS.match(v):
+        return True
+    items = cat.items_in(v)
+    return bool(items) and not re.search(r"\d|charm|logo", v, re.I)  # a product name, not a charm
+
+
+NEW_ORDER_RE = re.compile(r"\b(?:new|another|second|2nd|one more|ek aur|dusra)\s+order\b", re.I)
+PREFIX_RE = re.compile(
+    r"\b(?:add|put|with|use|lagao|laga do|likho)\b.{0,30}?\b(C\.?A\.?|Dr\.?|Adv\.?|Er\.?|Mr\.?|Mrs\.?|Ms\.?|CS|CMA)(?=\W|$).{0,25}?"
+    r"\b(?:prefix|before|in front|aage|pehle|starting)", re.I)
+_saved_reply = "Your order {order_id} is already saved."
+_follow_up_reply = "Updated your order {order_id}:"
+_FIELD_TITLES = {"product_name": "Name", "charm": "Charm", "colour": "Colour", "quantity": "Quantity", "notes": "Notes"}
+
+
+async def follow_up(cfg: Dict[str, Any], customer: str, order: asyncpg.Record, text: str,
+                    history: List[Dict[str, Any]], language: str) -> None:
+    """A message after the order is saved: update it, answer, or stay quiet. Never restart or ask for the ID."""
+    said = "\n".join(ln for ln in text.splitlines() if not ln.startswith(SCREENSHOT_NOTE) and ln.strip() != "[photo]").strip()
+    current = {k: str(order[k] or "") for k in _FIELD_TITLES}
+    understood: Dict[str, str] = {}
+    action, answer = "", ""
+    if ai_ready():
+        context = (f"This customer's order {order['order_id']} is ALREADY SAVED with the details collected so far. Read their "
+                   "message as a change, an extra instruction, a question or chat. Never ask for the Order ID and never restart "
+                   "the order. An extra instruction ('make it beautiful', 'other side: X', 'print on keychain') is notes. A request "
+                   "to add a title/prefix to the name returns the full new product_name. Words naming the product type "
+                   "('CA keychain', 'doctor keychain') are not a charm. 'Thank you', 'ok' and emojis: action silent.")
+        turn = await ai_bot_turn(text, None, {"order_id": order["order_id"], **current}, history, language, context)
+        if turn:
+            understood, action, answer = turn
+    elif said:
+        understood = pattern_details(said)
+    understood.pop("order_id", None)
+    understood.pop("order_date", None)
+    m = PREFIX_RE.search(said)
+    if m:
+        prefix = m.group(1).strip()
+        prefix = "CA" if prefix.replace(".", "").upper() == "CA" else prefix
+        name = understood.get("product_name") or current["product_name"]
+        if name and not name.lower().replace(".", "").startswith(prefix.lower().replace(".", "")):
+            understood["product_name"] = f"{prefix} {name}"
+    changes: Dict[str, str] = {}
+    for k in ("product_name", "charm", "colour", "quantity"):
+        v = (understood.get(k) or "").strip()
+        if v and v != current[k]:
+            changes[k] = v[:100]
+    note = (understood.get("notes") or "").strip()
+    if note and note.lower() not in current["notes"].lower():
+        changes["notes"] = (f"{current['notes']}; {note}" if current["notes"] else note)[:300]
+    if changes:
+        cols = list(changes)
+        await db().execute(f"UPDATE orders SET {', '.join(f'{c} = ${i + 2}' for i, c in enumerate(cols))} WHERE id = $1",
+                           order["id"], *[changes[c] for c in cols])
+        head = fill_template(await localize_reply(_follow_up_reply, language), {"order_id": order["order_id"]})
+        lines = "\n".join(f"{_FIELD_TITLES[c]}: {changes[c]}" for c in cols)
+        await send_wa(cfg, customer, "\n\n".join(filter(None, (answer, f"{head}\n{lines}"))))
+        return
+    if action == "answer" and answer:
+        await send_wa(cfg, customer, answer)
+        return
+    if detect_ids(text):  # they sent the same Order ID again
+        await send_wa(cfg, customer, fill_template(await localize_reply(_saved_reply, language), {"order_id": order["order_id"]}))
+    # otherwise (thanks, ok, emojis, chat): stay quiet
 
 
 def product_context(fields: Dict[str, str]) -> str:
@@ -3473,9 +3622,11 @@ async def save_extracted_order(label: str, customer: str, row: Dict[str, str]) -
     )
     if not existing:
         return await insert_order(
-            {**row, "source": "whatsapp", "channel": label, "customer_phone": customer}
+            {"source": "whatsapp", **row, "channel": label, "customer_phone": customer}
         )
     changes = {f: row[f] for f in ("product_name", "colour", "charm", "quantity", "notes") if row.get(f) and not existing[f]}
+    if changes and existing["source"] == "screenshot":
+        changes["source"] = "whatsapp"
     if row.get("order_date") and not existing["order_date"]:
         changes["order_date"] = parse_order_date(row["order_date"])
     if not existing["customer_phone"]:
@@ -4171,7 +4322,7 @@ async def inbox_conversations(
             f" OR EXISTS (SELECT 1 FROM orders o WHERE o.customer_phone = c.customer_phone AND c.customer_phone <> ''"
             f"   AND (o.order_id ILIKE ${i} OR o.product_name ILIKE ${i} OR o.charm ILIKE ${i}))"
             f" OR EXISTS (SELECT 1 FROM wa_messages m WHERE m.number_label = c.number_label"
-            f"   AND m.customer_phone = c.customer_phone AND m.body ILIKE ${i})"
+            f"   AND m.customer_phone = c.customer_phone AND (m.body ILIKE ${i} OR m.ai_note ILIKE ${i}))"
         )
         digits = re.sub(r"\D", "", query)
         if len(digits) >= 4:
@@ -5164,6 +5315,7 @@ class BotSettingsIn(BaseModel):
     ask_charm: str = Field(..., min_length=1, max_length=1000)
     ask_notes: str = Field(..., min_length=1, max_length=1000)
     thank_you: str = Field(..., min_length=1, max_length=1500)
+    knowledge: str = Field("", max_length=3000)  # shop facts the bot may use to answer questions
 
 
 class LabelSettingsIn(BaseModel):

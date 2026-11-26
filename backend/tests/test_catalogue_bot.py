@@ -204,12 +204,19 @@ try:
         th = c.get(f"/api/inbox/conversations/Shop M/{A}", headers=H(tok)).json()
         note = [m["ai_note"] for m in th["messages"] if m["kind"] == "image"][0]
         check(note.startswith("📷") and "357100000000000336" in note and "free OCR" in note, "note under the photo", note)
+        o = [x for x in c.get("/api/orders", headers=H(tok)).json() if x.get("customer_phone") == A]
+        check(len(o) == 1 and o[0]["order_id"] == "357100000000000336" and o[0]["source"] == "screenshot" and not o[0]["product_name"],
+              "order saved straight away from the screenshot (before the name)", o)
+        check(any(x["customer_phone"] == A for x in c.get("/api/inbox/conversations", headers=H(tok), params={"q": "357100000000000336"}).json()),
+              "Chats search finds it by order ID")
+        check(any(r["phone"] == A for r in c.get("/api/customer-data", headers=H(tok), params={"order_id": "357100000000000336"}).json()["rows"]),
+              "Customer Data finds it")
         BOT_TURNS.append({"product_name": "Test Doctor Name", "action": "collect"})
         msg("a2", A, "Test Doctor Name")
         wait_reply(A, 2)
         o = [x for x in c.get("/api/orders", headers=H(tok)).json() if x.get("customer_phone") == A]
-        check(len(o) == 1 and o[0]["order_id"] == "357100000000000336" and o[0]["product_name"] == "Test Doctor Name" and not o[0]["charm"],
-              "order saved with the screenshot's ID and the name", o)
+        check(len(o) == 1 and o[0]["order_id"] == "357100000000000336" and o[0]["product_name"] == "Test Doctor Name" and not o[0]["charm"]
+              and o[0]["source"] == "whatsapp", "the same order filled in with the name (no duplicate)", o)
         ocr_before = len(ocr_calls)
         msg("a3", A, image="MEDIA-A2")
         time.sleep(3)
@@ -221,6 +228,12 @@ try:
         msg("b1", B, image="MEDIA-B")
         replies = wait_reply(B, 1)
         check(replies and "charm" in replies[-1].lower(), "wallet: asks name + charm", replies)
+        BOT_TURNS.append({"product_name": "Ravi", "action": "collect"})
+        msg("b2", B, "Ravi")
+        replies = wait_reply(B, 2)
+        o = [x for x in c.get("/api/orders", headers=H(tok)).json() if x.get("customer_phone") == B]
+        check(replies and "charm" in replies[-1].lower() and len(o) == 1 and o[0]["source"] == "screenshot",
+              "name alone doesn't finish a wallet order: still asks the charm", (replies[-1:], o))
         th = c.get(f"/api/inbox/conversations/Shop M/{B}", headers=H(tok)).json()
         note = [m["ai_note"] for m in th["messages"] if m["kind"] == "image"][0]
         check("357199999999999999" in note and "₹" not in note and "299" not in note, "AI read it; the price is dropped", note)
@@ -303,6 +316,7 @@ try:
         msg("h1", H2, image="MEDIA-H")
         wait_reply(H2, 1)
         asyncio.run(sql_exec(f'DELETE FROM "{SCHEMA}".wa_conversations WHERE customer_phone=$1', H2))
+        asyncio.run(sql_exec(f'DELETE FROM "{SCHEMA}".orders WHERE customer_phone=$1', H2))  # as if read before this update
         asyncio.run(sql_exec(f"UPDATE \"{SCHEMA}\".wa_messages SET ai_note='' WHERE customer_phone=$1", H2))
         sent_before = len(sent)
         r = c.post("/api/screenshots/test", headers=H(tok), params={"limit": 20, "compare": "false"}).json()

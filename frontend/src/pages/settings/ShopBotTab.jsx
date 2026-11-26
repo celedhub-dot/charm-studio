@@ -13,6 +13,12 @@ const BOT_FIELDS = [
   { key: "ask_charm", label: "3. Charm choice", help: "" },
   { key: "ask_notes", label: "4. Notes", help: "Customers can reply none, no, skip or - to leave notes empty." },
   { key: "thank_you", label: "5. Thank-you message", help: "Sent once all four answers are in.", rows: 6 },
+  {
+    key: "knowledge",
+    label: "Shop facts for the bot",
+    help: "The bot answers customer questions only from these facts (e.g. both-side printing, delivery time, fonts, return policy). If something isn't here, it says your team will confirm. Leave out prices if you don't want the bot to quote them.",
+    rows: 6,
+  },
 ];
 const PLACEHOLDERS = ["{shop_name}", "{order_id}", "{name}", "{charm}", "{colour}", "{quantity}", "{extra}", "{notes}"];
 
@@ -85,11 +91,11 @@ function BotCard() {
 
   const save = async (e) => {
     e.preventDefault();
-    const empty = BOT_FIELDS.find(({ key }) => !(form[key] || "").trim());
+    const empty = BOT_FIELDS.find(({ key }) => key !== "knowledge" && !(form[key] || "").trim());
     if (empty) return toast.error(`"${empty.label}" can't be empty`);
     setSaving(true);
     try {
-      setSettings(await saveSettings("bot", Object.fromEntries(BOT_FIELDS.map(({ key }) => [key, form[key]]))));
+      setSettings(await saveSettings("bot", Object.fromEntries(BOT_FIELDS.map(({ key }) => [key, form[key] ?? ""]))));
       toast.success("Bot messages saved. The bot uses them from the next message.");
     } catch (err) {
       toast.error(errorMessage(err));
@@ -127,7 +133,7 @@ function BotCard() {
                   data-testid={`bot-${key}-input`}
                   rows={rows || 2}
                   className="min-h-0"
-                  maxLength={key === "thank_you" ? 1500 : 1000}
+                  maxLength={key === "knowledge" ? 3000 : key === "thank_you" ? 1500 : 1000}
                   value={form[key] || ""}
                   onChange={(e) => setForm({ ...form, [key]: e.target.value })}
                 />
