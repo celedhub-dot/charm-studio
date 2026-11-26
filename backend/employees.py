@@ -14,6 +14,7 @@ PERMISSIONS = {
     "ai_labels": "Use paid AI label analysis",
     "exports": "Export orders and chats",
     "dashboard": "View dashboard",
+    "team": "Post messages and files in team group chats",
 }
 
 # All permissions in a tuple are required. Sending returns a chat transcript.
@@ -27,5 +28,5 @@ ENDPOINTS = {
     "orders_sheet": ("exports", "orders"), "inbox_export_chat": ("exports", "chats"),
     "stats": ("dashboard",), "extract": ("extract",), "extract_bulk_file": ("extract",),
     "pdf_analyze": ("labels",), "pdf_annotate": ("labels",), "pdf_preview": ("labels",),
-    "list_wa_numbers": ("chats",), "get_settings": (), "extract_options": (),
+    "list_wa_numbers": ("chats",), "team_post": ("chats", "team"), "team_file": ("chats", "team"), "get_settings": (), "extract_options": (),
 }

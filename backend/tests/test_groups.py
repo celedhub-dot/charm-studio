@@ -150,9 +150,44 @@ try:
         c2 = [x for x in c.get("/api/inbox/conversations", headers=H(tok)).json() if x["customer_phone"] == "919000000083"][0]
         check(c2["window_open"], "a message that reaches WhatsApp's API opens it")
 
+        print("Team chat in a group")
+        r = c.post(f"/api/team/Shop A/{GROUP}/post", headers=H(tok), json={"text": "Packing list for today"})
+        check(r.status_code == 200, "owner posts in the group", r.text)
+        post = [m for m in r.json()["messages"] if m["source"] == "team"][-1]
+        check(post["body"] == "Packing list for today" and post["sender"] == "Owner" and post["status"] == "team", "saved as a team post with the poster's name", post)
+        check(not sent, "nothing sent on WhatsApp")
+        r = c.post(f"/api/team/Shop A/{GROUP}/file", headers=H(tok), data={"caption": "labels"},
+                   files={"file": ("labels.pdf", b"%PDF-1.4 test", "application/pdf")})
+        f = [m for m in r.json()["messages"] if m["source"] == "team"][-1]
+        check(r.status_code == 200 and f["media_id"].startswith("team:") and f["body"] == "labels", "file shared", r.text[:200])
+        m = c.get(f"/api/inbox/media/{f['id']}", headers=H(tok))
+        check(m.status_code == 200 and m.content == b"%PDF-1.4 test", "file opens from the app")
+        big = c.post(f"/api/team/Shop A/{GROUP}/file", headers=H(tok), files={"file": ("big.bin", b"0" * (10 * 1024 * 1024 + 1), "application/octet-stream")})
+        check(big.status_code == 413, "files over 10 MB refused")
+        check(c.post("/api/team/Shop A/919000000083/post", headers=H(tok), json={"text": "x"}).status_code == 400, "only in group chats")
+        convs = {x["customer_phone"]: x for x in c.get("/api/inbox/conversations", headers=H(tok)).json()}
+        check(convs[GROUP]["team_unread"] == 0, "no unread badge for your own posts")
+
+        print("An employee and the Team chat permission")
+        temp = c.post("/api/employee/temporary-password", headers=H(tok)).json()["password"]
+        first = c.post("/api/auth/login", json={"email": "emp101@gmail.com", "password": temp}).json()
+        emp = c.post("/api/account/password", headers=H(first["token"]), json={"current_password": "", "new_password": "employee-test-pass-481"}).json()["token"]
+        c.patch("/api/employee", headers=H(tok), json={"key": "team", "enabled": False})
+        check(c.post(f"/api/team/Shop A/{GROUP}/post", headers=H(emp), json={"text": "hi"}).status_code == 403, "without the permission: can't post")
+        convs = {x["customer_phone"]: x for x in c.get("/api/inbox/conversations", headers=H(emp)).json()}
+        check(convs[GROUP]["team_unread"] == 2, "employee sees 2 new team messages", convs[GROUP])
+        check(c.get("/api/inbox/unread", headers=H(emp)).json()["team_unread"] == 2, "counted in the sidebar badge")
+        c.get(f"/api/inbox/conversations/Shop A/{GROUP}", headers=H(emp))
+        check(c.get("/api/inbox/unread", headers=H(emp)).json()["team_unread"] == 0, "opening the group clears it (for that person)")
+        c.patch("/api/employee", headers=H(tok), json={"key": "team", "enabled": True})
+        r = c.post(f"/api/team/Shop A/{GROUP}/post", headers=H(emp), json={"text": "Done packing"})
+        check(r.status_code == 200 and r.json()["messages"][-1]["sender"] == "emp101", "with the permission: posts under their name", r.text[:200])
+        check(c.get("/api/inbox/unread", headers=H(tok)).json()["team_unread"] == 1, "owner gets a badge for the employee's post")
+
         print("Export")
         txt = c.get(f"/api/inbox/conversations/Shop A/{GROUP}/export", headers=H(tok)).text
         check("+919000000081: My order" in txt and "Team Member: Packed" in txt, "export names who wrote each message", txt)
+        check("Owner (team): Packing list for today" in txt and "emp101 (team): Done packing" in txt, "team posts named in the export")
 
     print(f"\nALL {passed} CHECKS PASSED")
 finally:

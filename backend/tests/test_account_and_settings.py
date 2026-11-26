@@ -121,7 +121,7 @@ try:
         tok = r.json()["token"]
         employee = "emp101@gmail.com"
         access = c.get("/api/employee", headers=H(tok)).json()
-        assert access["username"] == employee and len(access["permissions"]) == 13
+        assert access["username"] == employee and len(access["permissions"]) == 14
         temporary = c.post("/api/employee/temporary-password", headers=H(tok)).json()["password"]
         first = c.post("/api/auth/login", json={"email": employee, "password": temporary}).json()
         assert first["scope"] == "password"

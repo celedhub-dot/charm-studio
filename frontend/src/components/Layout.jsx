@@ -80,7 +80,7 @@ function useUnread(enabled) {
     let alive = true;
     const load = () =>
       getUnread()
-        .then((d) => alive && setUnread(d.unread || 0))
+        .then((d) => alive && setUnread((d.unread || 0) + (d.team_unread || 0)))
         .catch(() => {});
     load();
     const t = setInterval(load, 15000);

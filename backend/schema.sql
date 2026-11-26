@@ -233,3 +233,23 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'search indexes skipped: %', SQLERRM;
 END $$;
+
+-- Team chat inside group chats: posts stay in Custom Label (never sent on WhatsApp)
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS team_user text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS team_files (
+    id         text PRIMARY KEY,
+    data       bytea NOT NULL,
+    mime       text NOT NULL DEFAULT '',
+    name       text NOT NULL DEFAULT '',
+    size       integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE team_files ENABLE ROW LEVEL SECURITY;
+CREATE TABLE IF NOT EXISTS team_reads (
+    username       text NOT NULL,
+    number_label   text NOT NULL,
+    customer_phone text NOT NULL,
+    read_at        timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (username, number_label, customer_phone)
+);
+ALTER TABLE team_reads ENABLE ROW LEVEL SECURITY;

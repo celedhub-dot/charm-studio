@@ -26,6 +26,7 @@ import {
   Archive,
   PushPin,
   BellSlash,
+  UsersThree,
 } from "@phosphor-icons/react";
 import {
   getConversations,
@@ -49,6 +50,8 @@ import TemplateDialog from "../components/TemplateDialog";
 import MessageMedia, { fmtSize } from "../components/MessageMedia";
 import ContactInfo, { Avatar, fmtPhone } from "../components/ContactInfo";
 import ChatMenu from "../components/ChatMenu";
+import TeamComposer from "../components/TeamComposer";
+import { useSession } from "../lib/session";
 
 const ORDER_FIELDS = ["order_id", "product_name", "colour", "charm", "quantity", "notes"];
 const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -175,7 +178,7 @@ function ConversationList({
                   <div className="mt-0.5 flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[13px] text-[#667781]">{c.last_preview}</span>
                     {c.customer_phone?.startsWith("g-") && (
-                      <span className="shrink-0 rounded bg-[#E9EDEF] px-1.5 py-0.5 text-[10px] font-medium text-[#54656F]" title="Group: read-only, the bot never reads or replies" aria-label="Group">
+                      <span className="shrink-0 rounded bg-[#E9EDEF] px-1.5 py-0.5 text-[10px] font-medium text-[#54656F]" title="Group: team chat inside the app; the bot never reads or replies" aria-label="Group">
                         Group
                       </span>
                     )}
@@ -186,6 +189,11 @@ function ConversationList({
                     )}
                     {c.muted && <BellSlash size={15} className="shrink-0 text-[#8696A0]" aria-label="Muted" />}
                     {c.pinned_at && !c.archived && <PushPin size={15} weight="fill" className="shrink-0 text-[#8696A0]" aria-label="Pinned" />}
+                    {c.team_unread > 0 && (
+                      <span className="grid h-5 min-w-5 place-items-center rounded-full bg-[#7C4DBA] px-1.5 text-[11px] font-semibold text-white" title="New team messages" data-testid="team-unread">
+                        {c.team_unread}
+                      </span>
+                    )}
                     {c.unread > 0 && (
                       <span
                         className={cn(
@@ -226,6 +234,7 @@ const SOURCE_META = {
   bot: { label: "Bot", icon: Robot },
   staff: { label: "Staff", icon: User },
   phone_app: { label: "Phone app", icon: DeviceMobile },
+  team: { label: "Team", icon: UsersThree },
 };
 
 function StatusTick({ m }) {
@@ -286,7 +295,7 @@ function MessageList({ messages, namePrefix }) {
                 )}
                 {out && src && first && (
                   <div className="mb-0.5 flex items-center gap-1 text-[12px] font-medium text-[#1F7A4D]">
-                    <src.icon size={12} /> {src.label}
+                    <src.icon size={12} /> {m.source === "team" ? `Team · ${m.sender || ""}` : src.label}
                   </div>
                 )}
                 {m.media_id ? (
@@ -495,6 +504,7 @@ function OrdersPanel({ thread, onChanged, onConfirm, onClose }) {
 /* ---------- Thread ---------- */
 function Thread({ sel, onBack, onSent, onDeleted }) {
   const [thread, setThread] = useState(null);
+  const { me } = useSession();
   const [text, setText] = useState("");
   const [file, setFile] = useState(null); // attachment waiting to be sent
   const [filePreview, setFilePreview] = useState("");
@@ -601,7 +611,7 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
               <div className="truncate text-[16px] text-[#111b21]">{contact.name || fmtPhone(contact.customer_phone)}</div>
               <div className="truncate text-[12.5px] text-[#667781]">
                 {contact.name ? `${fmtPhone(contact.customer_phone)} · ` : ""}via {contact.number_label}
-                {group && " · read-only, the bot stays out"}
+                {group && " · team chat (not sent on WhatsApp), the bot stays out"}
                 {number.bot_mode && !group && ` · bot: ${number.bot_mode === "read" ? "reads & saves orders" : number.bot_mode === "ask" ? "asks questions" : "off"}`}
                 <span className="hidden md:inline"> · click for contact info</span>
               </div>
@@ -644,9 +654,14 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
         </div>
 
         {group ? (
-          <div className="bg-[#F0F2F5] px-4 py-3 text-center text-xs text-muted" data-testid="group-readonly-note">
-            This group was copied from the phone app, so it's read-only here. The bot never reads or replies in groups.
-          </div>
+          <TeamComposer
+            contact={contact}
+            canPost={me?.role !== "employee" || (me.permissions || []).includes("team")}
+            onPosted={(t) => {
+              setThread(t);
+              onSent();
+            }}
+          />
         ) : (
         <form onSubmit={send} className="bg-[#F0F2F5] px-3 py-2.5" data-testid="reply-form">
           {!number.can_send ? (

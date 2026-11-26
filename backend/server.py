@@ -412,6 +412,15 @@ def _recent(store: Dict[str, List[float]], key: str, window: float) -> List[floa
 
 
 employee_permissions = ContextVar("employee_permissions", default=None)
+current_user = ContextVar("current_user", default="owner")  # "owner" or the employee's username
+
+
+def user_display() -> str:
+    """The name shown on team posts."""
+    who = current_user.get()
+    if who == "owner":
+        return (ACCOUNT.get("name") or "Owner").strip()[:60]
+    return who.split("@")[0][:60]
 
 
 def permitted(key):
@@ -427,11 +436,13 @@ async def require_session(request: Request) -> Dict[str, Any]:
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
     claims = read_token(signing_key(), token.strip()) if scheme.lower() == "bearer" and token else None
     employee_permissions.set(None)
+    current_user.set("owner")
     if claims and claims.get("sub") == "employee":
         row = await db().fetchrow("SELECT username, permissions, enabled, version FROM employee_access WHERE username=$1",
                                   claims.get("username"))
         if row and row["enabled"] and claims.get("version") == row["version"]:
             employee_permissions.set(frozenset(row["permissions"]))
+            current_user.set(row["username"])
             return claims
     if not claims or claims.get("sub") != "owner":
         raise HTTPException(401, "Please log in again.", headers={"WWW-Authenticate": "Bearer"})
@@ -4084,10 +4095,12 @@ async def inbox_conversations(
             cond += (f" OR EXISTS (SELECT 1 FROM orders o WHERE o.customer_phone = c.customer_phone AND c.customer_phone <> ''"
                      f" AND regexp_replace(upper(o.order_id), '[^A-Z0-9]', '', 'g') LIKE ${len(args)})")
         conds.append(cond + ")")
+    args.append(current_user.get())
+    me = len(args)
     args.append(max(1, min(limit, 200)))
     rows = await db().fetch(
         f"""SELECT c.*, EXISTS (SELECT 1 FROM saved_contacts s WHERE s.phone = c.customer_phone) AS saved_contact, (SELECT count(*) FROM orders o WHERE o.customer_phone = c.customer_phone
-                          AND c.customer_phone <> '') AS order_count
+                          AND c.customer_phone <> '') AS order_count, {TEAM_UNREAD_SQL.format(me=me)} AS team_unread
             FROM wa_contacts c {"WHERE " + " AND ".join(conds) if conds else ""}
             ORDER BY (c.pinned_at IS NOT NULL AND NOT c.archived) DESC, c.pinned_at DESC NULLS LAST,
                      c.last_message_at DESC LIMIT ${len(args)}""",
@@ -4096,14 +4109,23 @@ async def inbox_conversations(
     return [conversation_public(r) for r in rows]
 
 
+TEAM_UNREAD_SQL = """(CASE WHEN c.chat_kind = 'group' THEN (SELECT count(*) FROM wa_messages tm
+    WHERE tm.number_label = c.number_label AND tm.customer_phone = c.customer_phone AND tm.source = 'team'
+      AND tm.team_user <> ${me} AND tm.created_at > coalesce((SELECT tr.read_at FROM team_reads tr WHERE tr.username = ${me}
+      AND tr.number_label = c.number_label AND tr.customer_phone = c.customer_phone), '-infinity'::timestamptz)) ELSE 0 END)"""
+
+
 @api.get("/inbox/unread")
 async def inbox_unread():
+    team = await db().fetchval(f"SELECT COALESCE(sum({TEAM_UNREAD_SQL.format(me=1)}), 0) FROM wa_contacts c WHERE c.chat_kind = 'group' "
+                               "AND NOT c.muted", current_user.get())
     row = await db().fetchrow(
         "SELECT COALESCE(sum(unread) FILTER (WHERE NOT muted), 0) AS unread, "  # muted chats don't add to the count
         "count(*) FILTER (WHERE archived) AS archived, "
         "COALESCE(sum(unread) FILTER (WHERE archived AND NOT muted), 0) AS archived_unread FROM wa_contacts"
     )
-    return {"unread": int(row["unread"]), "archived": int(row["archived"]), "archived_unread": int(row["archived_unread"])}
+    return {"unread": int(row["unread"]), "archived": int(row["archived"]), "archived_unread": int(row["archived_unread"]),
+            "team_unread": int(team or 0)}
 
 
 async def _thread(label: str, phone: str) -> Dict[str, Any]:
@@ -4208,6 +4230,11 @@ async def customer_data(phone: str = "", order_id: str = "", missing: str = "", 
 @api.get("/inbox/conversations/{label}/{phone}")
 async def inbox_thread(label: str, phone: str):
     data = await _thread(label, phone)
+    if is_group_chat(phone):
+        await db().execute(
+            "INSERT INTO team_reads (username, number_label, customer_phone, read_at) VALUES ($1,$2,$3,now()) "
+            "ON CONFLICT (username, number_label, customer_phone) DO UPDATE SET read_at = now()",
+            current_user.get(), label, phone)
     await db().execute("UPDATE wa_contacts SET unread = 0 WHERE number_label = $1 AND customer_phone = $2", label, phone)
     data["contact"]["unread"] = 0
     return data
@@ -4811,7 +4838,12 @@ async def inbox_media(message_id: str):
     if not row or not row["media_id"]:
         raise HTTPException(404, "No file on this message.")
     cached = MEDIA_CACHE.get(row["media_id"])
-    if cached:
+    if row["media_id"].startswith("team:"):  # shared by the team inside the app: kept in the database
+        f = await db().fetchrow("SELECT data, mime FROM team_files WHERE id = $1", row["media_id"][5:])
+        if not f:
+            raise HTTPException(410, "This file was removed.")
+        data, mime = bytes(f["data"]), f["mime"]
+    elif cached:
         data, mime = cached
         MEDIA_CACHE.move_to_end(row["media_id"])
     else:
@@ -4865,7 +4897,7 @@ async def inbox_export_chat(label: str, phone: str, media: bool = False, tz: Opt
         raise HTTPException(404, "No chat with this customer on that number.")
     tz_minutes = tz if tz is not None and -720 <= tz <= 840 else int(SHOP_UTC_OFFSET.total_seconds() // 60)
     rows = await db().fetch(
-        "SELECT id, direction, kind, body, status, created_at, media_id, media_mime, media_name, sender FROM wa_messages "
+        "SELECT id, direction, kind, body, status, created_at, media_id, media_mime, media_name, sender, source FROM wa_messages "
         "WHERE number_label = $1 AND customer_phone = $2 AND status <> 'failed' ORDER BY created_at, id",
         label, phone,
     )
@@ -4878,7 +4910,9 @@ async def inbox_export_chat(label: str, phone: str, media: bool = False, tz: Opt
     files: List[tuple] = []  # (name in zip, bytes)
     total, counter = 0, 0
     for m in rows:
-        if m["direction"] != "in":
+        if m["source"] == "team":
+            who = f"{m['sender'] or 'Team'} (team)"
+        elif m["direction"] != "in":
             who = shop
         elif m["sender"]:  # group message: who in the group sent it
             who = saved_names.get(m["sender"]) or (f"+{m['sender']}" if m["sender"].isdigit() else m["sender"])
@@ -4892,7 +4926,10 @@ async def inbox_export_chat(label: str, phone: str, media: bool = False, tz: Opt
                 name = export_media_name(m, counter, m["created_at"])
                 try:
                     cached = MEDIA_CACHE.get(m["media_id"])
-                    if cached:
+                    if m["media_id"].startswith("team:"):  # a team file: from the database
+                        f = await db().fetchrow("SELECT data FROM team_files WHERE id = $1", m["media_id"][5:])
+                        data = bytes(f["data"]) if f else None
+                    elif cached:
                         data = cached[0]
                     elif cfg and total < EXPORT_MEDIA_MAX:
                         data, _mime = await fetch_media(cfg, m["media_id"])
@@ -4927,6 +4964,58 @@ async def inbox_export_chat(label: str, phone: str, media: bool = False, tz: Opt
         for name, data in files:
             z.writestr(name, data, compress_type=zipfile.ZIP_STORED)  # photos/audio are already compressed
     return Response(content=buf.getvalue(), media_type="application/zip", headers={"Content-Disposition": disposition("zip")})
+
+
+TEAM_FILE_MAX = 10 * 1024 * 1024
+
+
+class TeamPostIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4096)
+
+
+async def _team_record(label: str, phone: str, kind: str, body: str, media: Optional[Dict[str, str]] = None) -> None:
+    if not is_group_chat(phone):
+        raise HTTPException(400, "Team posts are for group chats.")
+    if not await db().fetchval("SELECT 1 FROM wa_contacts WHERE number_label=$1 AND customer_phone=$2", label, phone):
+        raise HTTPException(404, "No such group.")
+    media = media or {}
+    name = user_display()
+    await db().execute(
+        "INSERT INTO wa_messages (id, number_label, customer_phone, direction, kind, body, status, source, error, created_at, "
+        "sender, team_user, media_id, media_mime, media_name) VALUES ($1,$2,$3,'out',$4,$5,'team','team','',now(),$6,$7,$8,$9,$10)",
+        str(uuid.uuid4()), label, phone, kind, body[:4096], name, current_user.get(),
+        media.get("media_id", ""), media.get("media_mime", ""), media.get("media_name", ""))
+    shown = body or media.get("media_name", "") or kind
+    preview = f"{name}: " + (f"[{kind.capitalize()}] " if kind != "text" else "") + shown.replace("\n", " ")
+    await db().execute("UPDATE wa_contacts SET last_preview=$3, last_message_at=now() WHERE number_label=$1 AND customer_phone=$2",
+                       label, phone, preview[:120])
+    await db().execute(
+        "INSERT INTO team_reads (username, number_label, customer_phone, read_at) VALUES ($1,$2,$3,now()) "
+        "ON CONFLICT (username, number_label, customer_phone) DO UPDATE SET read_at = now()", current_user.get(), label, phone)
+
+
+@api.post("/team/{label}/{phone}/post")
+async def team_post(label: str, phone: str, payload: TeamPostIn):
+    """A team message inside a group chat: stays in Custom Label, never sent on WhatsApp."""
+    await _team_record(label, phone, "text", payload.text.strip())
+    return await _thread(label, phone)
+
+
+@api.post("/team/{label}/{phone}/file")
+async def team_file(label: str, phone: str, caption: str = Form(""), file: UploadFile = File(...)):
+    """A file shared with the team inside a group chat (stored in the database, up to 10 MB)."""
+    data = await file.read(TEAM_FILE_MAX + 1)
+    if not data:
+        raise HTTPException(400, "The file is empty.")
+    if len(data) > TEAM_FILE_MAX:
+        raise HTTPException(413, "That file is too big. Team files can be up to 10 MB.")
+    mime = (file.content_type or "application/octet-stream").split(";")[0].strip().lower()
+    kind = "image" if mime.startswith("image/") else "video" if mime.startswith("video/") else "audio" if mime.startswith("audio/") else "document"
+    fname = re.sub(r"[\r\n\\/]+", "_", file.filename or "file")[:120]
+    fid = uuid.uuid4().hex
+    await db().execute("INSERT INTO team_files (id, data, mime, name, size) VALUES ($1,$2,$3,$4,$5)", fid, data, mime, fname, len(data))
+    await _team_record(label, phone, kind, caption.strip()[:1024], {"media_id": f"team:{fid}", "media_mime": mime, "media_name": fname})
+    return await _thread(label, phone)
 
 
 @api.post("/inbox/send-media")

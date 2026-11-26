@@ -164,7 +164,7 @@ export default function ContactInfo({ thread, onClose, onShowOrders, onTemplate,
           {name && !isGroup(phone) && <div className="mt-0.5 text-[11px] text-muted">Name from the customer's WhatsApp profile</div>}
           {isGroup(phone) && (
             <div className="mt-2 rounded-full bg-[#E9EDEF] px-3 py-1 text-[11px] font-medium text-[#54656F]" data-testid="contact-info-group">
-              Group from the phone app: read-only here, and the bot never reads or replies
+              Team chat: posts stay in Custom Label (not sent on WhatsApp). The bot never reads or replies here.
             </div>
           )}
           {contact.saved_contact && (

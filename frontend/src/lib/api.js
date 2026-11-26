@@ -199,6 +199,15 @@ export const getTemplates = (number, refresh = false) =>
 export const sendTemplate = (data) => api.post("/inbox/send-template", data).then((r) => r.data);
 export const getMediaBlob = (messageId) =>
   api.get(`/inbox/media/${encodeURIComponent(messageId)}`, { responseType: "blob" }).then((r) => r.data);
+// Team chat inside group chats (stays in Custom Label, never sent on WhatsApp)
+const groupPath = (label, phone) => `/team/${encodeURIComponent(label)}/${encodeURIComponent(phone)}`;
+export const teamPost = (label, phone, text) => api.post(`${groupPath(label, phone)}/post`, { text }).then((r) => r.data);
+export const teamFile = (label, phone, file, caption) => {
+  const form = new FormData();
+  form.append("caption", caption || "");
+  form.append("file", file);
+  return api.post(`${groupPath(label, phone)}/file`, form).then((r) => r.data);
+};
 export const sendInboxMedia = (numberLabel, to, file, caption) => {
   const form = new FormData();
   form.append("number_label", numberLabel);
