@@ -135,8 +135,9 @@ export const previewLabel = (file, page, { position, fontSize }, details, signal
   if (details) fd.append("details", JSON.stringify(details));
   return api.post("/pdf/preview", fd, { responseType: "blob", signal }).then((r) => r.data);
 };
-export const annotatePdf = (file, { position, skipUnmatched, fontSize, overrides }) => {
+export const annotatePdf = (file, { position, skipUnmatched, fontSize, overrides, engravingList = true }) => {
   const fd = new FormData();
+  fd.append("engraving_list", engravingList ? "true" : "false");
   fd.append("file", file);
   fd.append("position", position);
   fd.append("skip_unmatched", skipUnmatched ? "true" : "false");

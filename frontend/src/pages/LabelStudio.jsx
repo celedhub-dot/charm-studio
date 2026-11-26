@@ -290,6 +290,7 @@ export default function LabelStudio() {
   const [position, setPosition] = useState(defaults?.position || "bottom-right");
   const [skipUnmatched, setSkipUnmatched] = useState(!!defaults?.skip_unmatched);
   const [fontSize, setFontSize] = useState(defaults?.font_size || 8);
+  const [engravingList, setEngravingList] = useState(true);
   // Settings may arrive after this page opens: apply the saved defaults once.
   const appliedDefaults = useRef(!!defaults);
   useEffect(() => {
@@ -351,7 +352,7 @@ export default function LabelStudio() {
           ov[page.page] ??= page.status === "matched" ? page.matches[0].id : "__unmatched__";
         }
       }
-      const res = await annotatePdf(file, { position, skipUnmatched, fontSize, overrides: ov });
+      const res = await annotatePdf(file, { position, skipUnmatched, fontSize, overrides: ov, engravingList });
       const name = filenameFromDisposition(res.headers["content-disposition"], `annotated_${file.name}`);
       downloadBlob(res.data, name);
       const matched = res.headers["x-matched-pages"] ?? "?";
@@ -444,7 +445,7 @@ export default function LabelStudio() {
         <div className="page-enter grid gap-6">
           <Card>
             <CardContent className="grid gap-5 p-5 lg:grid-cols-[1fr_auto] lg:items-end">
-              <div className="grid gap-4 sm:grid-cols-3">
+              <div className="grid gap-4 sm:grid-cols-4">
                 <div className="space-y-1.5">
                   <Label title="Meesho, Flipkart and most labels get the box right below the label. The corner is used only for layouts Custom Label doesn't recognise.">
                     Corner (unusual labels only)
@@ -472,6 +473,15 @@ export default function LabelStudio() {
                   <div className="flex h-10 items-center gap-3">
                     <Switch id="skip-unmatched" data-testid="skip-unmatched-switch" checked={skipUnmatched} onCheckedChange={setSkipUnmatched} />
                     <span className="text-sm text-muted">{skipUnmatched ? "No red stickers" : "Mark with red sticker"}</span>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="engraving-list" title="A first page listing every name to engrave: golden strip, metal pen, metal keychain (two sides), bracelet, neck chain, rakhi, and labels with a name missing.">
+                    Engraving list page
+                  </Label>
+                  <div className="flex h-10 items-center gap-3">
+                    <Switch id="engraving-list" data-testid="engraving-list-switch" checked={engravingList} onCheckedChange={setEngravingList} />
+                    <span className="text-sm text-muted">{engravingList ? "Added at the front" : "Not added"}</span>
                   </div>
                 </div>
               </div>

@@ -299,10 +299,41 @@ try:
         check(r.status_code == 200 and r.content[:8] == b"\x89PNG\r\n\x1a\n" and r.headers["content-type"] == "image/png", "preview is a picture of the page", r.status_code)
         check(c.post("/api/pdf/preview", headers=H(tok), data={"page": "9"}, files={"file": ("l.pdf", pdf, "application/pdf")}).status_code == 400,
               "a page that isn't in the PDF is refused")
-        r = c.post("/api/pdf/annotate", headers=H(tok), data={"overrides": json.dumps({"1": "__none__"})}, files={"file": ("l.pdf", pdf, "application/pdf")})
+        r = c.post("/api/pdf/annotate", headers=H(tok), data={"overrides": json.dumps({"1": "__none__"}), "engraving_list": "false"},
+                   files={"file": ("l.pdf", pdf, "application/pdf")})
         out = pymupdf.open(stream=r.content, filetype="pdf")
-        check("CUSTOMISATION" not in out[0].get_text() and "ORDER NOT FOUND" not in out[0].get_text(), "removed details: page 1 prints without a box")
+        check(out.page_count == 2 and "CUSTOMISATION" not in out[0].get_text() and "ORDER NOT FOUND" not in out[0].get_text(),
+              "removed details: page 1 prints without a box")
         check("ORDER NOT FOUND" in out[1].get_text(), "other pages unchanged")
+
+        print("Engraving list page")
+        # a Meesho-style label whose SKU is in the catalogue (a combo), a keychain order with a back side, and an unknown label
+        server.CATALOGUE[:] = [dict(x, sku=("kZ3Hx7Hi" if x["title"].startswith("Customised Wallet, Pen") else "")) for x in server.CATALOGUE]
+        c.post("/api/orders", headers=H(tok), json={"order_id": "357900000000000001_1", "product_name": "Rohan", "quantity": "2", "source": "manual"})
+        c.patch(f"/api/orders/{[x for x in c.get('/api/orders', headers=H(tok)).json() if x['customer_phone'] == G][0]['id']}", headers=H(tok),
+                json={"notes": "Other side: AIIMS 2026"})
+        doc = pymupdf.open()
+        def meesho_label(oid, sku, desc):
+            pg = doc.new_page(width=595, height=842)
+            y = 40
+            for ln in ["Customer Address", "Test Customer", "Product Details", "SKU", "Size", "Qty", "Color", "Order No.",
+                       sku, "Free Size", "1", "Black", oid, "TAX INVOICE", "Description", "HSN", "Qty", "Gross Amount", "Discount",
+                       "Taxable Value", "Taxes", "Total", desc, "482010"]:
+                pg.insert_text((20, y), ln, fontsize=8)
+                y += 11
+        meesho_label("357900000000000001_1", "kZ3Hx7Hi", "Some combo")                       # page 1: combo via SKU, qty 2
+        meesho_label("357122222222222222_1", "zzz", "Special Customised Doctor keychain")     # page 2: keychain via description
+        meesho_label("999999999999999999_1", "zzz", "Unknown thing")                          # page 3: no order
+        r = c.post("/api/pdf/annotate", headers=H(tok), files={"file": ("labels.pdf", doc.tobytes(), "application/pdf")})
+        out = pymupdf.open(stream=r.content, filetype="pdf")
+        first = out[0].get_text()
+        check(out.page_count == 4 and first.startswith("Engraving list"), "list page added in front of the 3 labels", out.page_count)
+        check("1. GOLDEN STRIP" in first and "2. METAL PEN" in first and "3. METAL KEYCHAIN" in first, "the three categories", first[:400])
+        check(first.count("Rohan") == 6, "combo name in golden strip, pen and keychain, twice each (quantity 2)", first)
+        check("AIIMS Delhi" in first and "AIIMS 2026" in first and "p.2" in first, "two-sided keychain on one line, with its label number")
+        check("NAME MISSING" in first and "999999999999999999_1" in first, "label without an order listed as missing")
+        r = c.post("/api/pdf/annotate", headers=H(tok), data={"engraving_list": "false"}, files={"file": ("labels.pdf", doc.tobytes(), "application/pdf")})
+        check(pymupdf.open(stream=r.content, filetype="pdf").page_count == 3, "switch off: no list page")
 
         print("Screenshot reader test button")
 

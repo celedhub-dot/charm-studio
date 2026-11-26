@@ -10,6 +10,7 @@ from email.utils import parseaddr
 import hashlib
 from contextvars import ContextVar
 import catalogue as cat
+import engraving
 import employees
 import hmac
 import html
@@ -2182,6 +2183,7 @@ async def pdf_annotate(
     skip_unmatched: bool = Form(False),
     font_size: float = Form(8),
     overrides: Optional[str] = Form(None),
+    engraving_list: bool = Form(True),
 ):
     if position not in ("bottom-right", "bottom-left", "top-right", "top-left"):
         position = "bottom-right"
@@ -2199,6 +2201,7 @@ async def pdf_annotate(
 
     matched = not_found = dates_saved = 0
     stamps: List[Optional[tuple]] = []
+    engrave: List[tuple] = []  # (section, line) for the engraving list page
     try:
         for i, page in enumerate(doc):
             pno = str(i + 1)
@@ -2206,6 +2209,7 @@ async def pdf_annotate(
                 stamps.append(None)  # details removed for this label: printed without a box
                 continue
             text = page.get_text()
+            title, qty = engraving.label_product(text, CATALOGUE)
             detected = detect_ids(text)
             order = None
             if pno in override_map:
@@ -2231,6 +2235,7 @@ async def pdf_annotate(
                     if res.endswith(" 1"):
                         dates_saved += 1
                         order["order_date"] = label_date
+                engrave += engraving.entries_for_page(i + 1, items or [order], title, qty, "")
                 if items:  # combo: one line per item
                     lines = [truncate(f"{(re.search(r'Item: ([^;]+)', o.get('notes') or '') or [None, 'Item'])[1]}: "
                                       f"{o.get('product_name') or '-'}" + (f"  Charm: {o['charm']}" if o.get("charm") else ""))
@@ -2241,6 +2246,7 @@ async def pdf_annotate(
                 stamps.append(order_stamp(order))
             else:
                 not_found += 1
+                engrave += engraving.entries_for_page(i + 1, [], title, qty, detected[0] if detected else "")
                 if skip_unmatched:
                     stamps.append(None)
                 else:
@@ -2249,6 +2255,12 @@ async def pdf_annotate(
         out = build_label_pdf(doc, stamps, position, font_size)
     finally:
         doc.close()
+    if engraving_list and engrave:  # the engraving list goes in front of the labels
+        listing = engraving.build_list_pdf(engrave, file.filename or "labels.pdf")
+        if listing:
+            merged = fitz.open(stream=listing, filetype="pdf")
+            merged.insert_pdf(fitz.open(stream=out, filetype="pdf"))
+            out = merged.tobytes(garbage=3, deflate=True)
 
     stem = Path(file.filename or "labels.pdf").stem
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem) or "labels"
@@ -5397,7 +5409,7 @@ CATALOGUE: List[Dict[str, str]] = []
 
 
 async def load_catalogue() -> None:
-    rows = await db().fetch("SELECT shop, marketplace, product_id, title, items FROM catalogue_products WHERE active")
+    rows = await db().fetch("SELECT shop, marketplace, product_id, sku, title, items FROM catalogue_products WHERE active")
     CATALOGUE[:] = [dict(r) for r in rows]
 
 
