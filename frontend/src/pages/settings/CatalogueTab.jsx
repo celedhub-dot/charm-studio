@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { UploadSimple } from "@phosphor-icons/react";
-import { getCatalogue, importCatalogue, errorMessage } from "../../lib/api";
+import { UploadSimple, Camera } from "@phosphor-icons/react";
+import { Link } from "react-router";
+import { cn } from "../../lib/utils";
+import { getCatalogue, importCatalogue, testScreenshots, errorMessage } from "../../lib/api";
 import SettingsCard from "./SettingsCard";
-import { Label, Spinner } from "../../components/ui/primitives";
+import { Label, Spinner, Switch } from "../../components/ui/primitives";
 import { SimpleSelect } from "../../components/ui/overlays";
 import { Button } from "../../components/ui/button";
 
@@ -93,6 +95,8 @@ export default function CatalogueTab() {
         {data && data.files.length === 0 && <p className="mt-4 text-sm text-muted">No catalogue uploaded yet. Until then the bot asks for a name and charm on every order.</p>}
       </SettingsCard>
 
+      <ScreenshotTest />
+
       {data && data.types.length > 0 && (
         <SettingsCard testId="catalogue-types" title="What the bot asks for" description="Worked out from each product's title. Colour is never asked; it's saved only when the customer asks to change it (wallets, purses, clutches, passport covers).">
           <table className="w-full text-sm">
@@ -116,5 +120,99 @@ export default function CatalogueTab() {
         </SettingsCard>
       )}
     </div>
+  );
+}
+
+const same = (a, b) => (a || "").replace(/[^0-9A-Z]/gi, "").toUpperCase() === (b || "").replace(/[^0-9A-Z]/gi, "").toUpperCase();
+
+/** Runs the free OCR on recent customer photos (optionally compared with Haiku). Saves nothing and replies to nobody. */
+function ScreenshotTest() {
+  const [compare, setCompare] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState(null);
+  const run = async () => {
+    setBusy(true);
+    setRes(null);
+    try {
+      setRes(await testScreenshots(12, compare));
+    } catch (e) {
+      toast.error(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const found = res ? res.results.filter((r) => r.ocr?.order_id).length : 0;
+  const agree = res ? res.results.filter((r) => r.ocr?.order_id && r.haiku?.order_id && same(r.ocr.order_id, r.haiku.order_id)).length : 0;
+  return (
+    <SettingsCard
+      testId="screenshot-test-card"
+      title="Screenshot reader"
+      description="Tries the free OCR on the 12 latest photos customers sent (WhatsApp keeps photos about 30 days). No one gets a reply. With the Haiku check on (about ₹0.02 per photo), an order ID both readers agree on is saved to that customer's data; nothing is overwritten."
+    >
+      <div className="flex flex-wrap items-center gap-4">
+        <Button onClick={run} disabled={busy} data-testid="screenshot-test-btn">
+          {busy ? <Spinner /> : <Camera size={16} />} {busy ? "Reading photos… (up to a minute if the OCR is waking up)" : "Test on recent photos"}
+        </Button>
+        <label className="flex items-center gap-2 text-sm">
+          <Switch checked={compare} onCheckedChange={setCompare} data-testid="screenshot-compare" /> Also compare with Haiku
+        </label>
+      </div>
+      {res && (
+        <div className="mt-4">
+          <p className="text-sm" data-testid="screenshot-test-summary">
+            OCR service: <b>{res.ocr_status}</b> · {res.photos} photos · order ID found by OCR in <b>{found}</b>
+            {compare && <> · same ID as Haiku in <b>{agree}</b> · saved to customer data: <b>{res.results.filter((r) => r.saved === "saved to customer data").length}</b></>}
+          </p>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs text-muted">
+                <tr>
+                  <th className="py-1.5">Photo</th>
+                  <th>Free OCR</th>
+                  {compare && <th>Haiku</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {res.results.map((r) => (
+                  <tr key={r.message_id} className="border-t border-line align-top">
+                    <td className="py-2 pr-3">
+                      <Link className="text-forest underline" to={"/chats?" + new URLSearchParams({ number: r.number, phone: r.phone })}>
+                        +{r.phone}
+                      </Link>
+                      <div className="text-xs text-muted">{new Date(r.at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</div>
+                    </td>
+                    <td className="pr-3">
+                      {r.ocr?.order_id ? (
+                        <>
+                          <span className="font-mono">{r.ocr.order_id}</span>
+                          {r.ocr.product && <div className="text-xs text-muted">{r.ocr.product}</div>}
+                        </>
+                      ) : (
+                        <span className="text-muted">{r.ocr_note}</span>
+                      )}
+                      {r.seconds > 0 && <div className="text-[11px] text-muted">{r.seconds}s</div>}
+                    </td>
+                    {compare && (
+                      <td>
+                        {r.haiku?.order_id ? (
+                          <>
+                            <span className="font-mono">{r.haiku.order_id}</span>{" "}
+                            {r.ocr?.order_id && (same(r.ocr.order_id, r.haiku.order_id) ? <span className="text-forest">✓ same</span> : <span className="text-danger">✗ different</span>)}
+                            {r.haiku.product && <div className="text-xs text-muted">{r.haiku.product}</div>}
+                            {r.saved && <div className={cn("text-xs font-medium", r.saved.startsWith("saved") ? "text-forest" : "text-muted")}>{r.saved}</div>}
+                          </>
+                        ) : (
+                          <span className="text-muted">{r.haiku ? (r.haiku.order_page ? "order page, no ID" : "not an order screenshot") : "-"}</span>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </SettingsCard>
   );
 }

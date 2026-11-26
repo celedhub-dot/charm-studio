@@ -35,6 +35,13 @@ async def drop_schema():
 
 asyncio.run(drop_schema())
 
+
+async def sql_exec(q, *args):
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"], statement_cache_size=0)
+    await conn.execute(q, *args)
+    await conn.close()
+
+
 import catalogue as cat  # noqa: E402
 import server  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -283,6 +290,34 @@ try:
         out = pymupdf.open(stream=r.content, filetype="pdf")
         check("CUSTOMISATION" not in out[0].get_text() and "ORDER NOT FOUND" not in out[0].get_text(), "removed details: page 1 prints without a box")
         check("ORDER NOT FOUND" in out[1].get_text(), "other pages unchanged")
+
+        print("Screenshot reader test button")
+
+        async def running():
+            return "running"
+        server.ocr_health = running
+        H2 = "919000000208"  # a customer who sent a screenshot but hasn't given a name yet: no order saved
+        OCR_TEXT["MEDIA-H"] = "Order #357133333333333333\nPersonalised Name Wallet\nmeesho"
+        VISION["MEDIA-H"] = {"order_page": True, "order_id": "357133333333333333", "product": "Personalised Name Wallet"}
+        VISION["MEDIA-A"] = {"order_page": True, "order_id": "357100000000000999", "product": "keychain"}  # disagrees with OCR
+        msg("h1", H2, image="MEDIA-H")
+        wait_reply(H2, 1)
+        asyncio.run(sql_exec(f'DELETE FROM "{SCHEMA}".wa_conversations WHERE customer_phone=$1', H2))
+        asyncio.run(sql_exec(f"UPDATE \"{SCHEMA}\".wa_messages SET ai_note='' WHERE customer_phone=$1", H2))
+        sent_before = len(sent)
+        r = c.post("/api/screenshots/test", headers=H(tok), params={"limit": 20, "compare": "false"}).json()
+        by = {x["phone"]: x for x in r["results"]}
+        check(r["ocr_status"] == "running" and by["919000000201"]["ocr"]["order_id"] == "357100000000000336", "OCR results shown", by.get("919000000201"))
+        check(by["919000000203"]["ocr"] is None and by["919000000203"]["ocr_note"], "photo without an order ID explained")
+        check(not [x for x in c.get("/api/orders", headers=H(tok)).json() if x.get("customer_phone") == H2], "without the Haiku check: nothing saved")
+        r = c.post("/api/screenshots/test", headers=H(tok), params={"limit": 20, "compare": "true"}).json()
+        by = {x["phone"]: x for x in r["results"]}
+        check(by[H2]["saved"] == "saved to customer data", "both agree: saved", by[H2])
+        o = [x for x in c.get("/api/orders", headers=H(tok)).json() if x.get("customer_phone") == H2]
+        check(len(o) == 1 and o[0]["order_id"] == "357133333333333333", "order ID now in the customer's data", o)
+        check(by["919000000201"]["saved"] == "", "OCR and Haiku disagree: not saved", by["919000000201"])
+        check(by["919000000206"]["saved"] in ("already saved", ""), "existing order not duplicated")
+        check(len(sent) == sent_before, "no customer got a message")
 
     print(f"\nALL {passed} CHECKS PASSED")
 finally:

@@ -169,6 +169,9 @@ export const clearChat = (label, phone) => api.post(`${threadPath(label, phone)}
 export const getSavedContacts = () => api.get("/saved-contacts").then((r) => r.data);
 export const addSavedContact = (phone, name) => api.post("/saved-contacts", { phone, name }).then((r) => r.data);
 export const removeSavedContact = (phone) => api.delete(`/saved-contacts/${encodeURIComponent(phone)}`).then((r) => r.data);
+// Screenshot reader test: free OCR (and optionally Haiku) on recent customer photos; saves nothing
+export const testScreenshots = (limit, compare) =>
+  api.post("/screenshots/test", null, { params: { limit, compare }, timeout: 5 * 60 * 1000 }).then((r) => r.data);
 // Catalogue: Meesho/Flipkart export files -> product names and types (no prices or stock)
 export const getCatalogue = () => api.get("/catalogue").then((r) => r.data);
 export const importCatalogue = (shop, file) => {

@@ -2410,6 +2410,94 @@ def ocr_order(text: str) -> Optional[Dict[str, str]]:
     return {"order_page": "yes", "order_id": oid, "product": product, "quantity": "", "via": "ocr"}
 
 
+async def ocr_health() -> str:
+    """'not set up', 'running' or 'asleep or unreachable'."""
+    if not OCR_URL or not OCR_KEY:
+        return "not set up"
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:  # a sleeping free service can take ~50 s to wake
+            r = await client.get(f"{OCR_URL}/health")
+        return "running" if r.status_code == 200 else f"answered {r.status_code}"
+    except httpx.HTTPError:
+        return "asleep or unreachable"
+
+
+async def haiku_screenshot(data: bytes, mime: str) -> Optional[Dict[str, str]]:
+    """What Haiku vision reads from a picture (used for the comparison test)."""
+    if AI_PROVIDER != "anthropic" or not ai_ready():
+        return None
+    content = [{"type": "image", "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(data).decode("ascii")}},
+               {"type": "text", "text": "Read this picture."}]
+    try:
+        got = parse_json_any(await claude_text(SCREENSHOT_SYSTEM, content, max_tokens=400, effort="low"))
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(got, list):
+        got = got[0] if got else {}
+    if not isinstance(got, dict):
+        return None
+    raw_id = str(got.get("order_id") or "").strip()
+    ids = detect_ids(raw_id)
+    return {"order_page": bool(got.get("order_page") is True), "order_id": ids[0] if ids else raw_id[:40],
+            "product": re.sub(r"\s+", " ", str(got.get("product") or ""))[:120]}
+
+
+@api.post("/screenshots/test")
+async def screenshots_test(limit: int = 12, compare: bool = False):
+    """Owner only: run the free OCR on recent customer photos, optionally checked against Haiku. Replies to nobody.
+    When both readers agree on the order ID, it's saved to that customer (order ID only; nothing is overwritten)."""
+    limit = max(1, min(limit, 20))
+    status = await ocr_health()
+    rows = await db().fetch(
+        "SELECT id, number_label, customer_phone, media_id, created_at FROM wa_messages WHERE direction='in' AND kind='image' "
+        "AND media_id<>'' AND media_id NOT LIKE 'team:%' AND created_at > now() - interval '29 days' "
+        "ORDER BY created_at DESC LIMIT $1", limit)
+    sem = asyncio.Semaphore(3)
+
+    async def one(r):
+        async with sem:
+            out = {"message_id": r["id"], "number": r["number_label"], "phone": r["customer_phone"],
+                   "at": r["created_at"].isoformat(), "ocr": None, "ocr_note": "", "haiku": None, "seconds": 0.0}
+            cfg = next((c for c in WA_ALL if c["logical_id"] == r["number_label"] and c["token"]), None)
+            if not cfg:
+                out["ocr_note"] = "number not in Settings"
+                return out
+            try:
+                data, mime = await fetch_media(cfg, r["media_id"])
+            except HTTPException as e:
+                out["ocr_note"] = f"photo not available: {e.detail}"
+                return out
+            t = time.time()
+            text = await ocr_text(data) if status == "running" else ""
+            out["seconds"] = round(time.time() - t, 1)
+            found = ocr_order(text)
+            out["ocr"] = found
+            out["ocr_note"] = ("found the order ID" if found else "read text, but no order ID" if text.strip()
+                               else "no text back" if status == "running" else f"OCR {status}")
+            out["saved"] = ""
+            if compare:
+                out["haiku"] = await haiku_screenshot(data, mime)
+                oid = (found or {}).get("order_id", "")
+                if oid and out["haiku"] and out["haiku"].get("order_id") and norm_id(oid) == norm_id(out["haiku"]["order_id"]):
+                    had = await db().fetchval(
+                        "SELECT 1 FROM orders WHERE upper(regexp_replace(order_id,'[^A-Za-z0-9]','','g'))=$1 AND customer_phone=$2",
+                        norm_id(oid), r["customer_phone"])
+                    if had:
+                        out["saved"] = "already saved"
+                    elif is_group_chat(r["customer_phone"]) or await is_saved_contact(r["customer_phone"]):
+                        out["saved"] = "not saved (group or saved contact)"
+                    else:
+                        await save_extracted_order(r["number_label"], r["customer_phone"], {"order_id": oid})
+                        out["saved"] = "saved to customer data"
+                    await db().execute("UPDATE wa_messages SET ai_note=$2 WHERE id=$1 AND ai_note=''", r["id"],
+                                       f"{SCREENSHOT_NOTE}: Order ID {oid}" + (f" | Product: {found['product']}" if found.get("product") else "")
+                                       + " | read by free OCR, checked by Haiku")
+            return out
+
+    results = await asyncio.gather(*(one(r) for r in rows))
+    return {"ocr_status": status, "photos": len(results), "results": results}
+
+
 async def read_screenshot(cfg: Dict[str, Any], media_id: str) -> Optional[Dict[str, str]]:
     """Order ID and product from an order screenshot: free OCR first, Haiku vision if OCR finds no ID."""
     try:
