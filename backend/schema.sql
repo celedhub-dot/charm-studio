@@ -198,3 +198,38 @@ UPDATE wa_contacts c SET window_inbound_at = m.at
 FROM (SELECT number_label, customer_phone, max(created_at) AS at FROM wa_messages
       WHERE direction = 'in' AND wa_message_id IS NOT NULL GROUP BY 1, 2) m
 WHERE c.window_inbound_at IS NULL AND m.number_label = c.number_label AND m.customer_phone = c.customer_phone;
+
+-- What the AI read from an order screenshot (order ID, product), shown under the photo; never prices
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS ai_note text NOT NULL DEFAULT '';
+-- Products from the Meesho / Flipkart export files: names, IDs and type only (no prices, stock or tax)
+CREATE TABLE IF NOT EXISTS catalogue_products (
+    shop        text NOT NULL,
+    marketplace text NOT NULL,
+    product_id  text NOT NULL,
+    sku         text NOT NULL DEFAULT '',
+    title       text NOT NULL,
+    grp         text NOT NULL DEFAULT '',
+    items       text NOT NULL DEFAULT '',
+    active      boolean NOT NULL DEFAULT true,
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (shop, marketplace, product_id)
+);
+ALTER TABLE catalogue_products ENABLE ROW LEVEL SECURITY;
+
+-- Faster "contains" searches in Chats, Orders and Customer Data (trigram indexes; skipped if the extension isn't allowed)
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pg_trgm not available: searches still work, just without the extra indexes';
+END $$;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_opclass WHERE opcname = 'gin_trgm_ops') THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS wa_messages_body_trgm ON wa_messages USING gin (body gin_trgm_ops)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS wa_contacts_preview_trgm ON wa_contacts USING gin (last_preview gin_trgm_ops)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS wa_contacts_name_trgm ON wa_contacts USING gin (name gin_trgm_ops)';
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'search indexes skipped: %', SQLERRM;
+END $$;

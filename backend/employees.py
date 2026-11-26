@@ -26,6 +26,6 @@ ENDPOINTS = {
     "update_order": ("edit",), "export_orders_csv": ("exports", "orders"),
     "orders_sheet": ("exports", "orders"), "inbox_export_chat": ("exports", "chats"),
     "stats": ("dashboard",), "extract": ("extract",), "extract_bulk_file": ("extract",),
-    "pdf_analyze": ("labels",), "pdf_annotate": ("labels",),
+    "pdf_analyze": ("labels",), "pdf_annotate": ("labels",), "pdf_preview": ("labels",),
     "list_wa_numbers": ("chats",), "get_settings": (), "extract_options": (),
 }

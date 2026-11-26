@@ -125,6 +125,16 @@ export const analyzePdf = (file, model = "", effort = "medium") => {
   fd.append("effort", effort);
   return api.post("/pdf/analyze", fd).then((r) => r.data);
 };
+// One label page as it will print (PNG blob). details: order fields, {not_found, id}, or null for no box.
+export const previewLabel = (file, page, { position, fontSize }, details, signal) => {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("page", String(page));
+  fd.append("position", position);
+  fd.append("font_size", String(fontSize));
+  if (details) fd.append("details", JSON.stringify(details));
+  return api.post("/pdf/preview", fd, { responseType: "blob", signal }).then((r) => r.data);
+};
 export const annotatePdf = (file, { position, skipUnmatched, fontSize, overrides }) => {
   const fd = new FormData();
   fd.append("file", file);
@@ -159,6 +169,14 @@ export const clearChat = (label, phone) => api.post(`${threadPath(label, phone)}
 export const getSavedContacts = () => api.get("/saved-contacts").then((r) => r.data);
 export const addSavedContact = (phone, name) => api.post("/saved-contacts", { phone, name }).then((r) => r.data);
 export const removeSavedContact = (phone) => api.delete(`/saved-contacts/${encodeURIComponent(phone)}`).then((r) => r.data);
+// Catalogue: Meesho/Flipkart export files -> product names and types (no prices or stock)
+export const getCatalogue = () => api.get("/catalogue").then((r) => r.data);
+export const importCatalogue = (shop, file) => {
+  const form = new FormData();
+  form.append("shop", shop);
+  form.append("file", file);
+  return api.post("/catalogue/import", form).then((r) => r.data);
+};
 export const importSavedContacts = (file) => {
   const form = new FormData();
   form.append("file", file);

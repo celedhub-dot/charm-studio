@@ -297,6 +297,11 @@ function MessageList({ messages, namePrefix }) {
                   !["text", "template"].includes(m.kind) && <div className="mb-0.5 text-[11px] font-medium uppercase text-muted">[{m.kind}]</div>
                 )}
                 {m.kind === "template" && <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">Template</div>}
+                {m.ai_note?.startsWith("📷") && (
+                  <div className="mb-1 rounded bg-black/5 px-1.5 py-1 text-[11.5px] text-[#1F7A4D]" data-testid="msg-ai-note" title="Read by the bot from this screenshot">
+                    {m.ai_note.replace("📷 ", "")}
+                  </div>
+                )}
                 {(!m.media_id || (m.body && m.body !== m.media_name)) ? (
                   <div className="whitespace-pre-wrap break-words">
                     {m.body ? linkify(m.body) : m.media_id || m.kind === "text" ? "" : "(no text)"}
@@ -819,9 +824,12 @@ export default function Chats() {
   const [archivedInfo, setArchivedInfo] = useState({ archived: 0, archived_unread: 0 });
   const sel = useMemo(() => (params.get("phone") && params.get("number") ? { label: params.get("number"), phone: params.get("phone") } : null), [params]);
 
+  const latest = useRef(0); // only the newest search may update the list (slow older replies are dropped)
   const load = useCallback(async () => {
+    const ticket = ++latest.current;
     try {
       const [list, counts] = await Promise.all([getConversations(query.trim(), number, archivedView), getUnread()]);
+      if (ticket !== latest.current) return;
       setItems(list);
       setArchivedInfo(counts);
     } catch (e) {

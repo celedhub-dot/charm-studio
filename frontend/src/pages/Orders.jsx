@@ -226,14 +226,17 @@ export default function Orders() {
     }
   };
 
+  const latest = useRef(0); // only the newest search may update the table (slow older replies are dropped)
   const load = useCallback(async (f) => {
+    const ticket = ++latest.current;
     setLoading(true);
     try {
-      setOrders(await getOrders(f));
+      const list = await getOrders(f);
+      if (ticket === latest.current) setOrders(list);
     } catch (e) {
-      toast.error(errorMessage(e, "Could not load orders"));
+      if (ticket === latest.current) toast.error(errorMessage(e, "Could not load orders"));
     } finally {
-      setLoading(false);
+      if (ticket === latest.current) setLoading(false);
     }
   }, []);
 

@@ -11,6 +11,9 @@ import {
   Plus,
   ArrowCounterClockwise,
   HandPointing,
+  Eye,
+  PencilSimple,
+  Trash,
 } from "@phosphor-icons/react";
 import {
   analyzePdf,
@@ -18,13 +21,15 @@ import {
   getExtractOptions,
   getOrders,
   createOrder,
+  updateOrder,
+  previewLabel,
   downloadBlob,
   filenameFromDisposition,
   errorMessage,
 } from "../lib/api";
 import { PageHeader, EmptyState } from "../components/common";
 import { Card, CardContent, Badge, Input, Label, Switch, Spinner } from "../components/ui/primitives";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, SimpleSelect, Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/overlays";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, SimpleSelect, Tabs, TabsList, TabsTrigger, TabsContent, ConfirmDialog } from "../components/ui/overlays";
 import { Button } from "../components/ui/button";
 import { cn } from "../lib/utils";
 import { useSession } from "../lib/session";
@@ -42,7 +47,53 @@ const STATUS = {
   needs_review: { label: "Needs review", variant: "danger", icon: WarningCircle },
   not_found: { label: "Not found", variant: "danger", icon: WarningCircle },
   no_id: { label: "No ID", variant: "neutral", icon: MinusCircle },
+  removed: { label: "No box", variant: "neutral", icon: MinusCircle },
 };
+const REMOVED = { removed: true }; // details taken off this label: it prints without a box
+const DETAIL_KEYS = ["product_name", "charm", "colour", "quantity", "notes"];
+
+/** The label page as it will print, with `details` in its box (or a red "not found" box, or no box). */
+function LabelPreview({ file, page, opts, details, className }) {
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+  const key = JSON.stringify(details ?? null);
+  useEffect(() => {
+    const controller = new AbortController();
+    let made = "";
+    setBusy(true);
+    const t = setTimeout(async () => {
+      try {
+        const blob = await previewLabel(file, page, opts, details, controller.signal);
+        made = URL.createObjectURL(blob);
+        setUrl((old) => {
+          if (old) URL.revokeObjectURL(old);
+          return made;
+        });
+        setError("");
+      } catch (e) {
+        if (!controller.signal.aborted) setError("Couldn't make the preview. Try again.");
+      } finally {
+        if (!controller.signal.aborted) setBusy(false);
+      }
+    }, 450);
+    return () => {
+      clearTimeout(t);
+      controller.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, page, opts.position, opts.fontSize, key]);
+  useEffect(() => () => url && URL.revokeObjectURL(url), [url]);
+  return (
+    <div className={cn("relative grid min-h-48 place-items-center rounded-xl border border-line bg-sand/50 p-2", className)} data-testid="label-preview">
+      {url && <img src={url} alt={`Page ${page} as it will print`} className={cn("max-h-[60vh] w-auto rounded border border-line bg-white", busy && "opacity-60")} />}
+      {busy && <Spinner className="absolute h-6 w-6" />}
+      {error && !busy && <p className="text-sm text-danger">{error}</p>}
+    </div>
+  );
+}
+
+const detailsOf = (order) => (order ? Object.fromEntries(DETAIL_KEYS.map((k) => [k, order[k] || ""])) : null);
 
 export function StickerPreview({ position }) {
   const pos = {
@@ -61,10 +112,19 @@ export function StickerPreview({ position }) {
   );
 }
 
-function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onCreated }) {
+function OverrideDialog({ page, orders, currentId, current, file, opts, startTab, onPick, onClear, onClose, onCreated }) {
   const [q, setQ] = useState("");
-  const [draft, setDraft] = useState({ order_id: page?.detected_ids?.[0] || "", product_name: "", colour: "", charm: "", quantity: "", notes: "" });
+  const editing = !!current?.id; // this label already has an order: edit that order, don't make a duplicate
+  const [draft, setDraft] = useState({
+    order_id: current?.order_id || page?.detected_ids?.[0] || "",
+    product_name: current?.product_name || "",
+    colour: current?.colour || "",
+    charm: current?.charm || "",
+    quantity: current?.quantity || "",
+    notes: current?.notes || "",
+  });
   const [saving, setSaving] = useState(false);
+  const [confirmSave, setConfirmSave] = useState(false);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -78,9 +138,15 @@ function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onC
     if (!draft.order_id.trim()) return toast.error("Order ID is required");
     setSaving(true);
     try {
-      const created = await createOrder({ ...draft, source: "manual" });
-      toast.success("Order created and assigned to this page");
-      onCreated(created);
+      if (editing) {
+        const updated = await updateOrder(current.id, draft);
+        toast.success(`Order ${updated.order_id} updated`);
+        onCreated(updated);
+      } else {
+        const created = await createOrder({ ...draft, source: "manual" });
+        toast.success("Order created and assigned to this page");
+        onCreated(created);
+      }
     } catch (e) {
       toast.error(errorMessage(e));
     } finally {
@@ -90,7 +156,7 @@ function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onC
 
   return (
     <Dialog open={!!page} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-5xl">
         <DialogHeader>
           <DialogTitle>Page {page?.page}: choose an order</DialogTitle>
           <DialogDescription>
@@ -104,13 +170,13 @@ function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onC
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs defaultValue="pick">
+        <Tabs defaultValue={startTab || (editing || !orders.length ? "new" : "pick")}>
           <TabsList>
             <TabsTrigger value="pick" data-testid="override-tab-pick">
               Pick existing
             </TabsTrigger>
             <TabsTrigger value="new" data-testid="override-tab-new">
-              New order
+              {editing ? "Edit details" : "New order"}
             </TabsTrigger>
           </TabsList>
           <TabsContent value="pick">
@@ -154,6 +220,13 @@ function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onC
             )}
           </TabsContent>
           <TabsContent value="new">
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div>
+            {editing && (
+              <p className="mb-3 rounded-lg bg-forest-50 px-3 py-2 text-xs text-forest">
+                This label already has order <span className="font-mono">{current.order_id}</span>. Saving updates that order, so the label and the order stay the same.
+              </p>
+            )}
             <div className="grid gap-3 sm:grid-cols-2">
               {[
                 ["order_id", "Order ID"],
@@ -175,10 +248,26 @@ function OverrideDialog({ page, orders, currentId, onPick, onClear, onClose, onC
               ))}
             </div>
             <div className="mt-4 flex justify-end">
-              <Button onClick={create} disabled={saving} data-testid="override-create-btn">
-                {saving ? <Spinner /> : <Plus size={16} />} Create &amp; assign
+              <Button onClick={() => (editing ? setConfirmSave(true) : create())} disabled={saving} data-testid="override-create-btn">
+                {saving ? <Spinner /> : editing ? <PencilSimple size={16} /> : <Plus size={16} />} {editing ? "Save changes" : "Create & assign"}
               </Button>
             </div>
+            </div>
+            <div>
+              <Label>Preview</Label>
+              <LabelPreview file={file} page={page.page} opts={opts} details={detailsOf(draft)} className="mt-1.5" />
+              <p className="mt-1.5 text-xs text-muted">Updates as you type: this is exactly how this label will print.</p>
+            </div>
+            </div>
+            <ConfirmDialog
+              open={confirmSave}
+              onOpenChange={setConfirmSave}
+              testId="override-save"
+              title={`Change order ${current?.order_id || ""}?`}
+              description="The saved order's details will change everywhere (Orders, Chats, this label)."
+              confirmLabel="Save changes"
+              onConfirm={create}
+            />
           </TabsContent>
         </Tabs>
       </DialogContent>
@@ -237,13 +326,17 @@ export default function LabelStudio() {
     }
   };
 
-  const pageStatus = (p) => (overrides[p.page] ? "manual" : p.status);
+  const pageStatus = (p) => (overrides[p.page] === REMOVED ? "removed" : overrides[p.page] ? "manual" : p.status);
+  const orderFor = (p) => (overrides[p.page] === REMOVED ? null : overrides[p.page] || (p.status === "matched" ? p.matches[0] : null));
+  const [previewPage, setPreviewPage] = useState(null);
+  const [removePage, setRemovePage] = useState(null);
+  const opts = useMemo(() => ({ position, fontSize }), [position, fontSize]);
 
   const counts = useMemo(() => {
     const c = { matched: 0, not_found: 0, needs_review: 0, no_id: 0 };
     analysis?.pages.forEach((p) => {
       const s = pageStatus(p);
-      c[s === "manual" ? "matched" : s] += 1;
+      if (s !== "removed") c[s === "manual" ? "matched" : s] += 1;
     });
     return c;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -252,7 +345,7 @@ export default function LabelStudio() {
   const generate = async () => {
     setGenerating(true);
     try {
-      const ov = Object.fromEntries(Object.entries(overrides).map(([pg, o]) => [pg, o.id]));
+      const ov = Object.fromEntries(Object.entries(overrides).map(([pg, o]) => [pg, o === REMOVED ? "__none__" : o.id]));
       if (model) {
         for (const page of analysis.pages) {
           ov[page.page] ??= page.status === "matched" ? page.matches[0].id : "__unmatched__";
@@ -394,7 +487,8 @@ export default function LabelStudio() {
             <Badge variant="danger" data-testid="summary-not-found">{counts.not_found} not found</Badge>
             {counts.needs_review > 0 && <Badge variant="danger">{counts.needs_review} need review</Badge>}
             <Badge variant="neutral" data-testid="summary-no-id">{counts.no_id} no ID</Badge>
-            {Object.keys(overrides).length > 0 && <Badge variant="accent">{Object.keys(overrides).length} manual</Badge>}
+            {Object.values(overrides).filter((o) => o !== REMOVED).length > 0 && <Badge variant="accent">{Object.values(overrides).filter((o) => o !== REMOVED).length} manual</Badge>}
+            {Object.values(overrides).filter((o) => o === REMOVED).length > 0 && <Badge variant="neutral">{Object.values(overrides).filter((o) => o === REMOVED).length} without box</Badge>}
           </div>
 
           {analysis.pages.length === 0 ? (
@@ -404,12 +498,15 @@ export default function LabelStudio() {
               {analysis.pages.map((p) => {
                 const st = pageStatus(p);
                 const meta = STATUS[st];
-                const order = overrides[p.page] || (p.status === "matched" ? p.matches[0] : null);
+                const order = orderFor(p);
                 return (
-                  <button
+                  <div
                     key={p.page}
+                    role="button"
+                    tabIndex={0}
                     data-testid={`page-card-${p.page}`}
                     onClick={() => setActivePage(p)}
+                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && e.target === e.currentTarget && setActivePage(p)}
                     className={cn(
                       "hover-lift group flex flex-col overflow-hidden rounded-2xl border bg-white text-left shadow-card",
                       st === "not_found" ? "border-danger/30" : "border-line"
@@ -444,11 +541,31 @@ export default function LabelStudio() {
                           <div className="truncate"><span className="text-muted">Notes:</span> {order.notes || "—"}</div>
 
                         </div>
+                      ) : st === "removed" ? (
+                        <div className="text-xs text-muted">Details removed: this label prints without a box.</div>
                       ) : (
                         <div className="mt-auto text-xs font-medium text-terracotta-700 group-hover:underline">Click to pick or create an order</div>
                       )}
+                      <div className="mt-auto flex flex-wrap gap-1.5 pt-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                        <Button size="sm" variant="outline" onClick={() => setPreviewPage(p)} data-testid={`page-preview-${p.page}`}>
+                          <Eye size={14} /> Preview
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => setActivePage({ ...p, startTab: "new" })} data-testid={`page-edit-${p.page}`}>
+                          {order ? <PencilSimple size={14} /> : <Plus size={14} />} {order ? "Edit details" : "Add details"}
+                        </Button>
+                        {order && (
+                          <Button size="sm" variant="ghost" className="text-danger hover:bg-red-50" onClick={() => setRemovePage(p)} data-testid={`page-remove-${p.page}`}>
+                            <Trash size={14} /> Remove
+                          </Button>
+                        )}
+                        {st === "removed" && (
+                          <Button size="sm" variant="ghost" onClick={() => setOverrides(({ [p.page]: _d, ...rest }) => rest)} data-testid={`page-undo-${p.page}`}>
+                            <ArrowCounterClockwise size={14} /> Undo
+                          </Button>
+                        )}
+                      </div>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -456,11 +573,61 @@ export default function LabelStudio() {
         </div>
       )}
 
+      {previewPage && (
+        <Dialog open onOpenChange={(v) => !v && setPreviewPage(null)}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>Page {previewPage.page}: print preview</DialogTitle>
+              <DialogDescription>
+                {orderFor(previewPage)
+                  ? `Order ${orderFor(previewPage).order_id}`
+                  : pageStatus(previewPage) === "removed"
+                    ? "Details removed: no box on this label."
+                    : skipUnmatched
+                      ? "No order: this label prints without a box (Skip unmatched pages is on)."
+                      : "No order: this label gets a red ORDER NOT FOUND box."}
+              </DialogDescription>
+            </DialogHeader>
+            <LabelPreview
+              file={file}
+              page={previewPage.page}
+              opts={opts}
+              details={
+                orderFor(previewPage)
+                  ? detailsOf(orderFor(previewPage))
+                  : pageStatus(previewPage) === "removed" || skipUnmatched
+                    ? null
+                    : { not_found: true, id: previewPage.detected_ids[0] || "" }
+              }
+            />
+          </DialogContent>
+        </Dialog>
+      )}
+
+      <ConfirmDialog
+        open={!!removePage}
+        onOpenChange={(v) => !v && setRemovePage(null)}
+        testId="page-remove"
+        title={`Remove the details from page ${removePage?.page || ""}?`}
+        description="This label will print without a customisation box. The saved order isn't changed or deleted, and you can undo this before downloading."
+        confirmLabel="Remove details"
+        onConfirm={() => {
+          const pg = removePage.page;
+          setOverrides((m) => ({ ...m, [pg]: REMOVED }));
+          setRemovePage(null);
+          toast.success(`Page ${pg}: details removed from the label`);
+        }}
+      />
+
       {activePage && (
         <OverrideDialog
           key={activePage.page}
           page={activePage}
           orders={orders}
+          file={file}
+          opts={opts}
+          current={orderFor(activePage)}
+          startTab={activePage.startTab}
           currentId={overrides[activePage.page]?.id}
           onClose={() => setActivePage(null)}
           onPick={(o) => {
@@ -472,7 +639,7 @@ export default function LabelStudio() {
             setActivePage(null);
           }}
           onCreated={(o) => {
-            setOrders((list) => [o, ...list]);
+            setOrders((list) => [o, ...list.filter((x) => x.id !== o.id)]);
             setOverrides((m) => ({ ...m, [activePage.page]: o }));
             setActivePage(null);
           }}
