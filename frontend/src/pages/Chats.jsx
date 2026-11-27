@@ -52,6 +52,7 @@ import { EmptyState, SourceBadge } from "../components/common";
 import { cn, timeAgo } from "../lib/utils";
 import TemplateDialog from "../components/TemplateDialog";
 import MessageMedia, { fmtSize } from "../components/MessageMedia";
+import MediaViewer, { isViewable } from "../components/MediaViewer";
 import ContactInfo, { Avatar, fmtPhone } from "../components/ContactInfo";
 import ChatMenu from "../components/ChatMenu";
 import TeamComposer from "../components/TeamComposer";
@@ -259,8 +260,9 @@ const sameGroup = (a, b) =>
   fmtDay(a.created_at) === fmtDay(b.created_at) &&
   new Date(b.created_at) - new Date(a.created_at) < 5 * 60 * 1000;
 
-function MessageList({ messages, namePrefix }) {
+function MessageList({ messages, namePrefix, contactName }) {
   const endRef = useRef(null);
+  const [viewing, setViewing] = useState(null); // message id open in the picture viewer
   const lastId = messages.length ? messages[messages.length - 1].id : null;
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
@@ -304,7 +306,7 @@ function MessageList({ messages, namePrefix }) {
                 )}
                 {m.media_id ? (
                   <div className={m.body && m.body !== m.media_name ? "mb-1" : ""}>
-                    <MessageMedia m={m} namePrefix={namePrefix} />
+                    <MessageMedia m={m} namePrefix={namePrefix} onOpen={isViewable(m) ? (x) => setViewing(x.id) : undefined} />
                   </div>
                 ) : (
                   !["text", "template"].includes(m.kind) && <div className="mb-0.5 text-[11px] font-medium uppercase text-muted">[{m.kind}]</div>
@@ -337,6 +339,15 @@ function MessageList({ messages, namePrefix }) {
         );
       })}
       <div ref={endRef} />
+      {viewing && (
+        <MediaViewer
+          items={messages.filter(isViewable)}
+          startId={viewing}
+          contactName={contactName}
+          namePrefix={namePrefix}
+          onClose={() => setViewing(null)}
+        />
+      )}
     </div>
   );
 }
@@ -711,7 +722,7 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
         </div>
 
         <div className="chat-wallpaper min-h-0 flex-1 overflow-y-auto">
-          <MessageList messages={messages} namePrefix={thread.orders[0]?.order_id || ""} />
+          <MessageList messages={messages} namePrefix={thread.orders[0]?.order_id || ""} contactName={contact.name || fmtPhone(contact.customer_phone)} />
         </div>
 
         {group ? (

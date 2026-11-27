@@ -60,7 +60,7 @@ function useMediaUrl(id, auto) {
 }
 
 const fmtSize = (n) => (n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
-export { fmtSize, useMediaUrl };
+export { fmtSize, useMediaUrl, loadUrl, downloadName, saveAs };
 
 function Failed({ error, onRetry }) {
   return (
@@ -121,7 +121,7 @@ function DownloadButton({ onClick, busy, className = "", testId }) {
 }
 
 /** Shows the photo / sticker / voice note / video / file attached to a chat message. */
-export default function MessageMedia({ m, namePrefix = "" }) {
+export default function MessageMedia({ m, namePrefix = "", onOpen }) {
   const kind = m.kind;
   const auto = kind === "image" || kind === "sticker" || kind === "audio"; // small enough to load right away
   const { url, error, loading, load } = useMediaUrl(m.id, auto);
@@ -149,13 +149,19 @@ export default function MessageMedia({ m, namePrefix = "" }) {
       );
     return (
       <div className="group relative inline-block max-w-full">
-        <a href={url} target="_blank" rel="noreferrer" title="Open full size" data-testid={`media-image-${m.id}`}>
+        <button
+          type="button"
+          onClick={() => (onOpen ? onOpen(m) : window.open(url, "_blank", "noreferrer"))}
+          className="block cursor-pointer"
+          title="View"
+          data-testid={`media-image-${m.id}`}
+        >
           <img
             src={url}
             alt={m.body || (kind === "sticker" ? "Sticker" : "Photo")}
             className={kind === "sticker" ? "h-28 w-28 object-contain" : "max-h-72 w-auto max-w-full rounded-lg object-cover"}
           />
-        </a>
+        </button>
         <DownloadButton
           onClick={download}
           busy={saving}
@@ -174,6 +180,24 @@ export default function MessageMedia({ m, namePrefix = "" }) {
       </div>
     ) : (
       <div className="flex h-10 w-64 max-w-full items-center justify-center rounded-full bg-black/5 text-muted">{loading ? <Spinner /> : "Voice note"}</div>
+    );
+  }
+
+  if (kind === "video" && onOpen) {  // opens in the viewer, like WhatsApp
+    return (
+      <div className="space-y-1">
+        <button
+          type="button"
+          onClick={() => onOpen(m)}
+          className="relative grid h-40 w-64 max-w-full place-items-center overflow-hidden rounded-lg bg-black/80 text-white"
+          title="Play"
+          data-testid={`media-video-open-${m.id}`}
+        >
+          {url && <video src={url} muted preload="metadata" className="absolute inset-0 h-full w-full object-cover opacity-70" />}
+          <span className="relative grid h-12 w-12 place-items-center rounded-full bg-black/50"><Play size={24} weight="fill" /></span>
+        </button>
+        <DownloadButton onClick={download} busy={saving} testId={`media-download-${m.id}`} className="text-forest hover:bg-black/5" />
+      </div>
     );
   }
 
