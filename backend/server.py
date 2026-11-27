@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import asyncpg
 import pymupdf as fitz
@@ -72,7 +72,8 @@ log = logging.getLogger("charm_studio")
 DATABASE_URL = os.environ["DATABASE_URL"]
 ORDER_FIELDS = ("order_id", "product_name", "colour", "charm", "quantity", "notes")
 ORDER_COLUMNS = (
-    "id, order_id, product_name, charm, notes, source, channel, created_at, customer_phone, order_date, colour, quantity"
+    "id, order_id, product_name, charm, notes, source, channel, created_at, customer_phone, order_date, colour, quantity, "
+    "caption, extra_charms"
 )
 ORDER_SELECT = ORDER_COLUMNS + ", confirmed_at"  # confirmed_at is set by sending a template, never inserted
 SOURCES = ("manual", "ai", "csv", "whatsapp", "screenshot")  # screenshot: order ID read from a photo, details still to come
@@ -325,6 +326,7 @@ async def lifespan(_: FastAPI):
     await load_account()
     await load_settings()
     await load_catalogue()
+    await clean_saved_order_ids()
     if AUTH_SECRET:
         await import_env_wa_numbers()
     await load_wa_numbers()
@@ -862,6 +864,8 @@ class OrderIn(BaseModel):
     notes: str = ""
     colour: str = ""
     quantity: str = ""  # as the customer wrote it, e.g. "2"
+    caption: str = ""  # passport cover caption, up to 4 lines
+    extra_charms: str = ""  # charms beyond the free ones, waiting for the Rs 20 payment to be confirmed
     source: str = "manual"
     channel: str = ""
     customer_phone: str = ""
@@ -875,6 +879,8 @@ class OrderPatch(BaseModel):
     notes: Optional[str] = None
     colour: Optional[str] = None
     quantity: Optional[str] = None
+    caption: Optional[str] = None
+    extra_charms: Optional[str] = None
     source: Optional[str] = None
     channel: Optional[str] = None
     customer_phone: Optional[str] = None
@@ -900,8 +906,36 @@ class TestSendIn(BaseModel):
 def clean_order_id(value: Any) -> str:
     """Spaces, a leading '#' and a typed 'Order#' / 'Order ID:' label never belong to the ID."""
     v = re.sub(r"\s+", "", str(value or ""))
+    if v.lower().startswith("wa-"):
+        return v  # a placeholder for an order whose ID isn't known yet
+    # Rule: keep only the marketplace ID itself ("1-#3560...", "-3476...", "Order#3476...", "OD 4392 ..." -> the ID)
+    m = re.search(r"OD\d{10,21}|(?<!\d)\d{9,20}(?:_\d{1,2})?(?!\d)", v, re.I)
+    if m:
+        return m.group(0).upper()
     v = re.sub(r"^(?:sub)?order(?:id|no\.?|number)?[#:.\-]*(?=(?:OD)?\d)", "", v, flags=re.I)
-    return v.lstrip("#:")
+    return v.lstrip("#:-")
+
+
+async def clean_saved_order_ids() -> int:
+    """Order ID cleaner for orders already saved: "1-#3560...", "-3476...", "Order#3476..." -> the ID itself.
+    Runs at startup; new and edited orders are cleaned when saved."""
+    rows = await db().fetch("SELECT id, order_id FROM orders WHERE order_id <> '' AND order_id NOT LIKE 'wa-%' "
+                            "AND order_id !~ '^(OD)?[0-9]+(_[0-9]+)?$'")
+    fixed = 0
+    for r in rows:
+        clean = clean_order_id(r["order_id"])
+        if clean and clean != r["order_id"] and re.fullmatch(r"(OD)?\d+(_\d+)?", clean):
+            await db().execute("UPDATE orders SET order_id = $2 WHERE id = $1", r["id"], clean)
+            fixed += 1
+    if fixed:
+        log.info("Order ID cleaner: cleaned %d saved order ID(s).", fixed)
+    return fixed
+
+
+def clean_caption(value: Any) -> str:
+    """A passport cover caption: up to 4 lines, each kept as the customer wrote it."""
+    lines = [ln.strip() for ln in re.split(r"\s*(?:\n|\r|\|)\s*", str(value or "")) if ln.strip()]
+    return "\n".join(ln[:60] for ln in lines[:4])
 
 
 def build_order(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -916,6 +950,8 @@ def build_order(data: Dict[str, Any]) -> Dict[str, Any]:
         "notes": str(data.get("notes") or "").strip(),
         "colour": str(data.get("colour") or "").strip()[:60],
         "quantity": str(data.get("quantity") or "").strip()[:20],
+        "caption": clean_caption(data.get("caption")),
+        "extra_charms": str(data.get("extra_charms") or "").strip()[:200],
         "source": source,
         "channel": str(data.get("channel") or ""),
         "created_at": now_utc(),
@@ -929,10 +965,11 @@ def order_args(d: Dict[str, Any]) -> tuple:
     return (
         d["id"], d["order_id"], d["product_name"], d["charm"], d["notes"],
         d["source"], d["channel"], d["created_at"], d["customer_phone"], d["order_date"], d["colour"], d["quantity"],
+        d["caption"], d["extra_charms"],
     )
 
 
-INSERT_ORDER_SQL = f"INSERT INTO orders ({ORDER_COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)"
+INSERT_ORDER_SQL = f"INSERT INTO orders ({ORDER_COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"
 
 
 async def insert_order(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1372,6 +1409,10 @@ async def update_order(oid: str, patch: OrderPatch):
         raise HTTPException(400, "No fields to update")
     if "customer_phone" in changes:
         changes["customer_phone"] = re.sub(r"\D", "", changes["customer_phone"])
+    if "order_id" in changes:
+        changes["order_id"] = clean_order_id(changes["order_id"])  # Rule: order IDs are always saved clean
+    if "caption" in changes:
+        changes["caption"] = clean_caption(changes["caption"])
     if "order_date" in changes:
         raw = changes["order_date"]
         changes["order_date"] = parse_order_date(raw) if raw else None
@@ -1385,6 +1426,26 @@ async def update_order(oid: str, patch: OrderPatch):
     if not row:
         raise HTTPException(404, "Order not found")
     return row_dict(row)
+
+
+class ExtraCharmsIn(BaseModel):
+    confirm: bool  # true: payment confirmed, the extra charms go on the label; false: drop them
+
+
+@api.post("/orders/{oid}/extra-charms")
+async def confirm_extra_charms(oid: str, payload: ExtraCharmsIn):
+    """Staff checked the customer's Rs 20-per-charm payment screenshot: add the extra charms (or drop them)."""
+    row = await db().fetchrow(f"SELECT {ORDER_SELECT} FROM orders WHERE id = $1", oid)
+    if not row:
+        raise HTTPException(404, "Order not found")
+    if not row["extra_charms"]:
+        raise HTTPException(400, "This order has no extra charms waiting for payment.")
+    charm = row["charm"] or ""
+    if payload.confirm:
+        charm = ", ".join(filter(None, (charm, row["extra_charms"])))
+    updated = await db().fetchrow(
+        f"UPDATE orders SET charm = $2, extra_charms = '' WHERE id = $1 RETURNING {ORDER_SELECT}", oid, charm)
+    return row_dict(updated)
 
 
 @api.delete("/orders/{oid}")
@@ -2186,14 +2247,14 @@ def build_label_pdf(src: fitz.Document, stamps: List[Optional[tuple]], position:
         w, h = page.rect.width, page.rect.height
         stamp = stamps[pno]
         if w < 400 and h < 650:  # a small shipping label
-            scale = _small_label_fit(w, h, n_lines, small_fs)
+            scale = _small_label_fit(w, h, max(n_lines, len(stamp[1]) if stamp else 0), small_fs)
             if scale >= 0.9:
                 queue.append((pno, scale))
                 continue
             flush()
             # too big for 4 per sheet: keep it on its own page, box right below where the label's content ends
             # (the page is made taller only when there's no blank space left under the label)
-            bh = box_height(n_lines, small_fs)
+            bh = box_height(max(n_lines, len(stamp[1]) if stamp else 0), small_fs)
             boxes = page_content_boxes(page)
             content_bottom = max((b.y1 for b in boxes), default=h)
             fits = stamp and content_bottom + BOX_GAP + bh <= h - 4
@@ -2218,19 +2279,39 @@ def build_label_pdf(src: fitz.Document, stamps: List[Optional[tuple]], position:
     return data
 
 
+def caption_lines(order: Dict[str, Any]) -> List[str]:
+    return [f"  {truncate(ln, 40)}" for ln in (order.get("caption") or "").splitlines() if ln.strip()][:4]
+
+
 def order_stamp(order: Dict[str, Any]) -> tuple:
-    """The customisation box for one order."""
+    """The customisation box for one order: the name, its caption lines (passport covers), charm, notes."""
     return (
         "CUSTOMISATION",
-        [
-            f"Name: {truncate(order.get('product_name') or '-')}",
-            f"Charm: {truncate(order.get('charm') or '-')}"
+        [f"Name: {truncate(order.get('product_name') or '-', 40)}"]
+        + caption_lines(order)
+        + [
+            f"Charm: {truncate(order.get('charm') or '-', 40)}"
             + (f"  Colour: {order['colour']}" if order.get("colour") else "")
             + (f"  Qty: {order['quantity']}" if order.get("quantity") and str(order["quantity"]) != "1" else ""),
             f"Notes: {truncate(order.get('notes') or '-')}",
         ],
         GREEN,
     )
+
+
+def combo_stamp(items: List[Dict[str, Any]]) -> tuple:
+    """A combo's box: one line per item with its own name and charm(s), then any caption lines."""
+    lines: List[str] = []
+    for o in items:
+        m = re.search(r"Item: ([^;]+)", o.get("notes") or "")
+        label = m.group(1).strip() if m else "Item"
+        line = f"{label}: {o.get('product_name') or '-'}" + (f" · Charm {o['charm']}" if o.get("charm") else "")
+        lines.append(truncate(line, 48))
+        lines += caption_lines(o)
+    notes = next((n for n in (re.sub(r"(?:^|;\s*)Item:[^;]*", "", o.get("notes") or "").strip("; ") for o in items) if n), "")
+    if notes:
+        lines.append(f"Notes: {truncate(notes, 40)}")
+    return ("CUSTOMISATION", lines[:9], GREEN)
 
 
 @api.post("/pdf/preview")
@@ -2262,7 +2343,7 @@ async def pdf_preview(
             stamp = ("ORDER NOT FOUND", [f"ID: {truncate(oid, 34)}" if oid else "No order ID detected",
                                          "Check the order in Custom Label", ""], RED)
         else:
-            stamp = order_stamp({k: str(d.get(k) or "")[:200] for k in ("product_name", "charm", "colour", "quantity", "notes")})
+            stamp = order_stamp({k: str(d.get(k) or "")[:300] for k in ("product_name", "caption", "charm", "colour", "quantity", "notes")})
         out = fitz.open(stream=build_label_pdf(single, [stamp], position, font_size), filetype="pdf")
         pg = out[0]
         area = fitz.Rect()
@@ -2276,6 +2357,62 @@ async def pdf_preview(
     return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+ENGRAVING_EMBED = "custom-label-engraving.json"
+
+
+def embed_engraving(pdf: bytes, blocks: List[tuple]) -> bytes:
+    """Keep the engraving names inside the filled PDF (an attached file), for the .txt from a filled PDF."""
+    try:
+        doc = fitz.open(stream=pdf, filetype="pdf")
+        doc.embfile_add(ENGRAVING_EMBED, json.dumps([[s, lines] for s, lines in blocks], ensure_ascii=False).encode())
+        data = doc.tobytes(garbage=3, deflate=True)
+        doc.close()
+        return data
+    except Exception:  # noqa: BLE001  (the PDF still prints without it)
+        log.warning("Could not attach the engraving names to the PDF", exc_info=True)
+        return pdf
+
+
+def txt_response(text: str, stem: str) -> Response:
+    if not text.strip():
+        raise HTTPException(400, "No names to engrave were found for these labels.")
+    return Response(content=text.encode("utf-8-sig"), media_type="text/plain; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="engraving_{stem}.txt"'})
+
+
+@api.post("/pdf/engraving-txt")
+async def engraving_txt_from_filled(file: UploadFile = File(...)):
+    """The .txt engraving file from a filled label PDF made by Custom Label. Uses the names saved inside it;
+    for older filled PDFs, reads the order IDs on each page and looks the orders up again."""
+    data = await file.read()
+    doc = open_pdf(data)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(file.filename or "labels.pdf").stem) or "labels"
+    stem = re.sub(r"^annotated_", "", stem)
+    try:
+        if ENGRAVING_EMBED in doc.embfile_names():
+            blocks = [(s, list(lines)) for s, lines in json.loads(doc.embfile_get(ENGRAVING_EMBED).decode())]
+            return txt_response(engraving.build_txt(blocks), stem)
+        orders = await load_all_orders()
+        blocks, seen = [], set()
+        for page in doc:
+            text = page.get_text()
+            if text.strip().lower().startswith("engraving list"):
+                continue  # our own list page in front of the labels
+            title, qty = engraving.label_product(text, CATALOGUE)
+            for oid in detect_ids(text):
+                if norm_id(oid) in seen:
+                    continue
+                seen.add(norm_id(oid))
+                found = match_orders([oid], orders)
+                ok = label_status([oid], found) == "matched"
+                blocks += engraving.txt_blocks_for_page(found if ok else [], title, qty, oid)
+    finally:
+        doc.close()
+    if not blocks:
+        raise HTTPException(400, "This PDF has no order IDs. Upload a filled label PDF made by Custom Label.")
+    return txt_response(engraving.build_txt(blocks), stem)
+
+
 @api.post("/pdf/annotate")
 async def pdf_annotate(
     file: UploadFile = File(...),
@@ -2284,6 +2421,7 @@ async def pdf_annotate(
     font_size: float = Form(8),
     overrides: Optional[str] = Form(None),
     engraving_list: bool = Form(True),
+    output: str = Form("pdf"),  # "txt": only the engraving names file for the laser
 ):
     if position not in ("bottom-right", "bottom-left", "top-right", "top-left"):
         position = "bottom-right"
@@ -2302,6 +2440,7 @@ async def pdf_annotate(
     matched = not_found = dates_saved = 0
     stamps: List[Optional[tuple]] = []
     engrave: List[tuple] = []  # (section, line) for the engraving list page
+    txt_blocks: List[tuple] = []  # (section, lines) for the .txt engraving file
     try:
         for i, page in enumerate(doc):
             pno = str(i + 1)
@@ -2336,17 +2475,15 @@ async def pdf_annotate(
                         dates_saved += 1
                         order["order_date"] = label_date
                 engrave += engraving.entries_for_page(i + 1, items or [order], title, qty, "")
-                if items:  # combo: one line per item
-                    lines = [truncate(f"{(re.search(r'Item: ([^;]+)', o.get('notes') or '') or [None, 'Item'])[1]}: "
-                                      f"{o.get('product_name') or '-'}" + (f"  Charm: {o['charm']}" if o.get("charm") else ""))
-                             for o in items]
-                    lines = lines[:2] + [truncate(" | ".join(lines[2:]))] if len(lines) > 3 else lines + [""] * (3 - len(lines))
-                    stamps.append(("CUSTOMISATION", lines, GREEN))
+                txt_blocks += engraving.txt_blocks_for_page(items or [order], title, qty, "")
+                if items:  # combo: one line per item, each with its own name and charm
+                    stamps.append(combo_stamp(items))
                     continue
                 stamps.append(order_stamp(order))
             else:
                 not_found += 1
                 engrave += engraving.entries_for_page(i + 1, [], title, qty, detected[0] if detected else "")
+                txt_blocks += engraving.txt_blocks_for_page([], title, qty, detected[0] if detected else "")
                 if skip_unmatched:
                     stamps.append(None)
                 else:
@@ -2364,6 +2501,9 @@ async def pdf_annotate(
 
     stem = Path(file.filename or "labels.pdf").stem
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem) or "labels"
+    if output == "txt":
+        return txt_response(engraving.build_txt(txt_blocks), safe)
+    out = embed_engraving(out, txt_blocks)  # so the filled PDF can give the .txt again later
     return Response(
         content=out,
         media_type="application/pdf",
@@ -2399,6 +2539,7 @@ ORDER_ID_GUIDE = Path(__file__).with_name("order-id-guide.jpg")  # a Flipkart or
 ORDER_ID_GUIDE_MEESHO = Path(__file__).with_name("order-id-guide-meesho.jpg")  # a Meesho order page
 
 
+COMBO_NAME_QUESTION = "Please send one name for all items, or a different name for each:"
 PRODUCT_QUESTION = ("Which product did you order (for example wallet, keychain, kada, pen)? "
                     "If it takes a charm, please send the charm number too.")
 SCREENSHOT_AGAIN = "Thanks! Please also send a screenshot of this order from your {platform} app, so we know which product it is."
@@ -2417,7 +2558,7 @@ def missing_questions(fields: Dict[str, str]) -> str:
         if key == "product_name" and fields.get("_items"):
             names = combo_names(fields)
             missing = [i for i in fields["_items"].split(",") if not names.get(i)]
-            lines.append("Please send the name for each item:\n" + "\n".join(f"{item_label(i)} -" for i in missing))
+            lines.append(COMBO_NAME_QUESTION + "\n" + "\n".join(f"{item_label(i)} -" for i in missing))
         elif key == "charm" and not fields.get("_product") and not fields.get("charm"):
             # product unknown: a kada, pen or metal keychain takes no charm, so find the product first.
             # While the Order ID is missing, the first question already asks for the order screenshot (it shows the product).
@@ -2473,10 +2614,42 @@ async def chat_product(biz: str, customer: str) -> Dict[str, str]:
     return found
 
 
+def resolve_charm_text(value: str):
+    """'Wallet: om | Passport cover: 46, crown' -> ('Wallet: 52 (Om) | Passport cover: 46 (Red heart), ...', options).
+    None when a number isn't on the chart. options: the numbers to ask about when a name fits several charms."""
+    segments = []
+    for seg in re.split(r"\s*\|\s*", value):
+        m = re.match(r"\s*([A-Za-z ]{2,20}?)\s*[:=]\s*(.+)", seg)
+        label, body = (m.group(1).strip(), m.group(2)) if m and cat.items_in(m.group(1)) else ("", seg)
+        out = []
+        for part in split_charms(body):
+            if off_chart(part):
+                return None
+            picked, options = charms.resolve(part)
+            if options and not picked:
+                return value, options
+            out.append(picked or part)
+        segments.append((f"{label}: " if label else "") + ", ".join(out))
+    return " | ".join(segments), []
+
+
 def apply_charm(fields: Dict[str, str]) -> None:
     """A charm name/number from the chart becomes '52 (Om)'; a name that fits several charms asks which number."""
     value = (fields.get("charm") or "").strip()
     if not value or fields.get("_charm_ok") == value:
+        return
+    if "|" in value or len(split_charms(value)) > 1:  # several charms, or a charm per combo item
+        resolved = resolve_charm_text(value)
+        if resolved is None:
+            fields.pop("charm", None)  # a number off the chart: ask again
+            return
+        text, options = resolved
+        if options:
+            fields.pop("charm", None)
+            fields["_charm_pick"] = ",".join(str(n) for n in options)
+            return
+        fields["charm"] = fields["_charm_ok"] = text
+        fields.pop("_charm_pick", None)
         return
     if off_chart(value):
         fields.pop("charm", None)  # e.g. "2721": not on the chart, ask again
@@ -2517,24 +2690,75 @@ async def send_charm_chart(cfg: Dict[str, Any], customer: str, caption: str) -> 
 
 
 def item_label(item: str) -> str:
-    return {"metal keychain": "Keychain", "leather keychain": "Keychain", "passport cover": "Passport cover"}.get(
-        item, item.capitalize())
+    return {"metal keychain": "Keychain", "leather keychain": "Leather keychain", "passport cover": "Passport cover",
+            "luggage tag": "Luggage tag", "sunglasses cover": "Sunglasses cover"}.get(item, item.capitalize())
 
 
-def combo_names(fields: Dict[str, str]) -> Dict[str, str]:
-    """'Wallet: Aarav | Keychain: Riya | Pen: Dev' -> {wallet: Aarav, metal keychain: Riya, pen: Dev}."""
-    items = [i for i in (fields.get("_items") or "").split(",") if i]
+def per_item(value: str, items: List[str], one_for_all: bool = True) -> Dict[str, str]:
+    """'Wallet: Aarav | Keychain: Riya' -> {wallet: Aarav, metal keychain: Riya}. A value with no item labels
+    (one name for the whole combo) goes on every item when one_for_all."""
     out: Dict[str, str] = {}
-    for part in re.split(r"\s*[|\n;]\s*", fields.get("product_name") or ""):
+    labelled = False
+    for part in re.split(r"\s*[|\n;]\s*", value or ""):
         m = re.match(r"\s*([A-Za-z ]{2,20}?)\s*[:=\-]\s*(.+)", part)
         if not m:
             continue
-        label, name = m.group(1).strip().lower(), m.group(2).strip()
+        label, val = m.group(1).strip().lower(), m.group(2).strip()
         for i in items:
             if label and (label in i or i.split()[-1].startswith(label.split()[-1][:4])):
-                out.setdefault(i, name[:60])
+                out.setdefault(i, val[:80])
+                labelled = True
                 break
+    if not labelled and one_for_all and (value or "").strip():
+        return {i: value.strip()[:80] for i in items}  # Rule: one name given for a combo = that name on every item
     return out
+
+
+def combo_names(fields: Dict[str, str]) -> Dict[str, str]:
+    """'Wallet: Aarav | Keychain: Riya | Pen: Dev' -> {wallet: Aarav, metal keychain: Riya, pen: Dev};
+    a single name for the combo goes on every item."""
+    items = [i for i in (fields.get("_items") or "").split(",") if i]
+    return per_item(fields.get("product_name") or "", items)
+
+
+def combo_charms(fields: Dict[str, str]) -> Dict[str, str]:
+    """Each combo item's charm(s): 'Wallet: 52 | Passport cover: 46, 9', or one charm for every charm item."""
+    value = fields.get("charm") or ""
+    logo = "logo" in value.lower()  # a metal keychain takes a logo, never a charm number
+    items = [i for i in (fields.get("_items") or "").split(",")
+             if i and (cat.NEEDS.get(i, (True, True))[1] or (logo and i in cat.LOGO_OK))]
+    return per_item(value, items)
+
+
+def item_takes_charm(item: str) -> bool:
+    return cat.NEEDS.get(item, (True, True))[1] or item in cat.LOGO_OK
+
+
+def free_charms(item: str, has_caption: bool) -> int:
+    """Rule: charms included in the price. Passport cover: 3 with a caption, otherwise 2; other leather items: 1.
+    Each extra charm is Rs 20 (paid, screenshot sent, confirmed by staff)."""
+    if item == "passport cover":
+        return 3 if has_caption else 2
+    return 1 if cat.NEEDS.get(item, (True, True))[1] else 0
+
+
+def split_charms(value: str) -> List[str]:
+    return [p.strip() for p in re.split(r"\s*(?:,|\+|&|\band\b)\s*", value or "") if p.strip()]
+
+
+def limit_charms(value: str, item: str, has_caption: bool) -> Tuple[str, str]:
+    """(charms that go on the label now, extra charms waiting for payment)."""
+    parts = split_charms(value)
+    if not item or len(parts) <= 1 or any("logo" in p.lower() for p in parts):
+        return value, ""
+    free = free_charms(item, has_caption)
+    if free <= 0 or len(parts) <= free:
+        return value, ""
+    return ", ".join(parts[:free]), ", ".join(parts[free:])
+
+
+EXTRA_CHARM_NOTE = ("Extra charms are ₹20 each. Our team will share the payment details; please send the payment "
+                    "screenshot here and we'll add the extra charm after confirming it.")
 
 
 S_CODE_RE = re.compile(r"\b[sS]\s*-\s*\d{6,}\b")
@@ -2878,7 +3102,8 @@ _reply_translations = OrderedDict()
 _updated_order_reply = "Thank you! Your details for order {order_id} have been updated."
 _english_reply_lines = set("\n".join([*(v for k, v in DEFAULT_SETTINGS["bot"].items() if k != "knowledge"), _updated_order_reply,
                                        "Your order {order_id} is already saved.", "Updated your order {order_id}:",
-                                       PRODUCT_QUESTION, NO_CHARM_REPLY, OFF_CHART_REPLY]).splitlines())
+                                       PRODUCT_QUESTION, NO_CHARM_REPLY, OFF_CHART_REPLY, COMBO_NAME_QUESTION,
+                                       EXTRA_CHARM_NOTE]).splitlines())
 _english_reply_lines |= {t.replace("{platform}", p) for t in (DEFAULT_SETTINGS["bot"]["ask_order_id"], SCREENSHOT_AGAIN)
                          for p in ("Meesho", "Flipkart", "Meesho or Flipkart")}
 _translation_preamble = re.compile(
@@ -2979,7 +3204,7 @@ _QTY_RE = re.compile(r"\b(?:qty|quantity|qnty)\s*(?:is\b|hai\b|[:=.-])?\s*(?P<v>
 _NOT_A_CHARM = {"a", "an", "the", "my", "any", "which", "what", "one", "this", "that", "your", "with", "and", "want", "need",
                 "of", "for", "same", "other", "wala", "konsa", "kaunsa", "name", "would", "should", "do", "kaun", "chahiye", "select"}
 _NOT_A_NAME = {"", "should", "what", "is", "please", "plz", "of", "on", "to", "be", "embossed"}
-DETAIL_KEYS = ["order_id", "product_name", "colour", "charm", "quantity", "notes"]
+DETAIL_KEYS = ["order_id", "product_name", "colour", "charm", "quantity", "notes", "caption"]
 
 
 def _clean_value(v: str) -> str:
@@ -3292,7 +3517,11 @@ BOT_TURN_SYSTEM = (
     "- order_id: the marketplace order/sub-order ID exactly as written (e.g. 123456789012_1, OD4321...).\n"
     "- product_name: the name/text to print or emboss (not the customer's own name unless they want it printed).\n"
     "- colour: the colour they chose.\n"
-    "- charm: the charm they chose exactly as given; if it's a number keep just the number (\"charm no. 12\" -> \"12\").\n"
+    "- charm: the charm they chose exactly as given; if it's a number keep just the number (\"charm no. 12\" -> \"12\"). "
+    "Several charms for one item: separate them with commas (\"12, 46\"). For a combo with a charm per item use "
+    "'Wallet: 12 | Passport cover: 46, 52'.\n"
+    "- caption: for a passport cover, extra text lines the customer wants printed besides the name (a quote, a title, "
+    "\"Happy journey\"...). Up to 4 lines, each on its own line (use \\n between lines). Never the name itself.\n"
     "- quantity: how many, as a number, only if stated.\n"
     "- notes: any other instruction (font, gift wrap, delivery request...).\n"
     "- order_date: when they placed the marketplace order, YYYY-MM-DD, only if stated (relative dates use the Today line).\n"
@@ -3379,7 +3608,7 @@ async def ai_bot_turn(text: str, asked: Optional[str], fields: Dict[str, str],
         data = data[0] if data else {}
     if not isinstance(data, dict):
         return None
-    limits = {"order_id": 40, "product_name": 60, "colour": 30, "charm": 40, "quantity": 10, "notes": 200}
+    limits = {"order_id": 40, "product_name": 300, "colour": 30, "charm": 200, "quantity": 10, "notes": 200, "caption": 300}
     out = {k: str(data.get(k) or "").strip()[: limits[k]] for k in DETAIL_KEYS}
     out = {k: v for k, v in out.items() if v}
     d = parse_order_date(data.get("order_date"))
@@ -3710,6 +3939,7 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
             "notes": fields.get("notes", ""),
             "colour": fields.get("colour", ""),
             "quantity": fields.get("quantity", ""),
+            "caption": clean_caption(fields.get("caption", "")),
             "source": "whatsapp",
             "channel": biz,
             "customer_phone": customer,
@@ -3726,28 +3956,41 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
                 oid, pre_id = pre_id, None
                 row = await db().fetchrow(
                     f"UPDATE orders SET product_name=$2, charm=$3, notes=$4, colour=$5, "
-                    f"quantity=CASE WHEN $6 <> '' THEN $6 ELSE quantity END, order_date=COALESCE($7, order_date), source='whatsapp' "
-                    f"WHERE id=$1 RETURNING {ORDER_SELECT}",
+                    f"quantity=CASE WHEN $6 <> '' THEN $6 ELSE quantity END, order_date=COALESCE($7, order_date), source='whatsapp', "
+                    f"caption=$8, extra_charms=$9 WHERE id=$1 RETURNING {ORDER_SELECT}",
                     oid, data["product_name"], data["charm"], data["notes"], data["colour"], data["quantity"],
-                    parse_order_date(data.get("order_date")) if data.get("order_date") else None)
+                    parse_order_date(data.get("order_date")) if data.get("order_date") else None,
+                    data.get("caption", ""), data.get("extra_charms", ""))
                 return row_dict(row)
             return await insert_order(data)
 
         names = combo_names(fields) if fields.get("_items") else {}
-        if names:  # a combo: one row per item, same order ID, so each item's name prints on the label
+        waiting: List[str] = []  # extra charms that need the Rs 20 payment first
+        if names:  # a combo: one row per item, same order ID, so each item's name (and charm) prints on the label
+            item_charms = combo_charms(fields)
             saved_rows = []
             for item in fields["_items"].split(","):
-                needs_charm = cat.NEEDS.get(item, (True, True))[1] or item in cat.LOGO_OK
+                charm, extra_c = limit_charms(item_charms.get(item, "") if item_takes_charm(item) else "",
+                                              item, bool(base["caption"]) and item == "passport cover")
+                if extra_c:
+                    waiting.append(f"{item_label(item)}: {extra_c}")
                 saved_rows.append(await save_row({
-                    **base, "product_name": names.get(item, ""), "charm": base["charm"] if needs_charm else "",
+                    **base, "product_name": names.get(item, ""), "charm": charm, "extra_charms": extra_c,
+                    "caption": base["caption"] if item == "passport cover" else "",
                     "colour": base["colour"] if item in cat.COLOUR_CHANGE_OK else "",
                     "notes": "; ".join(filter(None, (f"Item: {item_label(item)}", base["notes"]))),
                 }))
             order = dict(saved_rows[0])
             order["product_name"] = " | ".join(f"{item_label(i)}: {names.get(i, '')}" for i in fields["_items"].split(","))
+            order["charm"] = " | ".join(f"{item_label(i)}: {r['charm']}" for i, r in zip(fields["_items"].split(","), saved_rows)
+                                        if r.get("charm"))
             order["notes"] = base["notes"]
         else:
-            order = await save_row(base)
+            items = cat.items_in(fields.get("_product") or "")
+            charm, extra_c = limit_charms(base["charm"], items[0] if len(items) == 1 else "", bool(base["caption"]))
+            if extra_c:
+                waiting.append(extra_c)
+            order = await save_row({**base, "charm": charm, "extra_charms": extra_c})
         await db().execute(
             "DELETE FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2", biz, customer
         )
@@ -3771,6 +4014,10 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
                 "quantity": order.get("quantity") or "-",
             },
         )
+        if order.get("caption"):
+            summary += "\nCaption: " + order["caption"].replace("\n", " / ")
+        if waiting:  # Rule: extra charms are Rs 20 each, added after staff confirm the payment
+            summary += "\n\n" + await localize_reply(EXTRA_CHARM_NOTE, language)
         if answer:
             summary = answer + "\n\n" + summary
         await send_wa(cfg, customer, summary)  # never the example picture with the saved summary
@@ -3826,7 +4073,7 @@ PREFIX_RE = re.compile(
     r"\b(?:prefix|before|in front|aage|pehle|starting)", re.I)
 _saved_reply = "Your order {order_id} is already saved."
 _follow_up_reply = "Updated your order {order_id}:"
-_FIELD_TITLES = {"product_name": "Name", "charm": "Charm", "colour": "Colour", "quantity": "Quantity", "notes": "Notes"}
+_FIELD_TITLES = {"product_name": "Name", "caption": "Caption", "charm": "Charm", "colour": "Colour", "quantity": "Quantity", "notes": "Notes"}
 
 
 async def follow_up(cfg: Dict[str, Any], customer: str, order: asyncpg.Record, text: str,
@@ -3892,10 +4139,12 @@ async def follow_up(cfg: Dict[str, Any], customer: str, order: asyncpg.Record, t
             understood.pop("charm")
             await send_wa(cfg, customer, f"Which one? Please send the charm number: {', '.join(map(str, options[:-1]))} or {options[-1]}.")
             return
-    for k in ("product_name", "charm", "colour", "quantity"):
+    for k in ("product_name", "charm", "colour", "quantity", "caption"):
         v = (understood.get(k) or "").strip()
+        if k == "caption":
+            v = clean_caption(v)
         if v and v != current[k]:
-            changes[k] = v[:100]
+            changes[k] = v[:300]
     note = (understood.get("notes") or "").strip()
     if note and note.lower() not in current["notes"].lower():
         changes["notes"] = (f"{current['notes']}; {note}" if current["notes"] else note)[:300]

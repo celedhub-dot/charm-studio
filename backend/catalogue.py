@@ -9,8 +9,8 @@ import io
 import re
 from typing import Dict, Iterable, List, Optional, Tuple
 
-ITEM_ORDER = ["wallet", "purse", "clutch", "passport cover", "leather keychain", "metal keychain", "keychain",
-              "pen", "bracelet", "rakhi", "chain", "card holder", "belt"]
+ITEM_ORDER = ["wallet", "purse", "clutch", "passport cover", "leather keychain", "luggage tag", "sunglasses cover",
+              "metal keychain", "keychain", "pen", "bottle", "bracelet", "rakhi", "chain", "card holder", "belt"]
 
 # what each item type needs (wallet/purse/clutch/passport/leather keychain take a charm number;
 # a metal keychain takes a name and/or a logo image; pens, bracelets, rakhis and chains only a name;
@@ -18,6 +18,7 @@ ITEM_ORDER = ["wallet", "purse", "clutch", "passport cover", "leather keychain",
 NEEDS: Dict[str, Tuple[bool, bool]] = {  # item -> (name, charm)
     "wallet": (True, True), "purse": (True, True), "clutch": (True, True), "passport cover": (True, True),
     "leather keychain": (True, True), "metal keychain": (True, False), "keychain": (True, False),
+    "luggage tag": (True, True), "sunglasses cover": (True, True), "bottle": (True, False),
     "pen": (True, False), "bracelet": (True, False), "rakhi": (True, False), "chain": (True, False),
     "card holder": (False, False), "belt": (False, False),
 }
@@ -30,9 +31,12 @@ _RX = [
     ("purse", r"(?:ladies|women'?s?|womens)\b[^|]{0,30}\b(?:purse|wallet)|(?:purse|wallet) for (?:ladies|women)"),
     ("wallet", r"wallet"),
     ("leather keychain", r"leather\s+key\s*-?\s*(?:chain|ring)"),
+    ("luggage tag", r"luggage|bag\s*tag|baggage"),
+    ("sunglasses cover", r"(?:sun\s*glass(?:es)?|goggles?|spectacles?|specs|eye\s*wear)\s*(?:cover|case|pouch|holder)"),
     ("metal keychain", r"(?:metal|steel|metallic|engraved|laser)\b[^|]{0,40}key\s*-?\s*(?:chain|ring)|key\s*-?\s*(?:chain|ring)[^|]{0,40}\b(?:metal|steel|metallic)"),
     ("keychain", r"key\s*-?\s*(?:chain|ring)|keytchain|keyring"),
     ("pen", r"\bpens?\b"),
+    ("bottle", r"\bbottles?\b|sipper|flask|tumbler"),
     ("bracelet", r"bracelet|braclet|\bkada\b"),
     ("rakhi", r"rakhi"),
     ("chain", r"neck\s*chain|\bchain\b(?!\s*&)|pendant|locket|necklace"),

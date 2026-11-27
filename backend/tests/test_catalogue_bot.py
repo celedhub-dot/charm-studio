@@ -270,11 +270,13 @@ try:
         check(replies and "not your Order ID" in replies[-1], "S- code with other details: still asked for the real ID", replies)
 
         print("Combo: a name per item")
+        BOT_TURNS.clear()  # the S- code step above never used its queued AI answer
         F = "919000000206"
         OCR_TEXT["MEDIA-F"] = "Order #357111111111111111\nCustomised Wallet, Pen & Metal Keychain Combo Pack for Men\nmeesho"
         msg("f1", F, image="MEDIA-F")
         replies = wait_reply(F, 1)
-        check(replies and "Wallet -" in replies[-1] and "Keychain -" in replies[-1] and "Pen -" in replies[-1], "asks a name for each item", replies)
+        check(replies and server.COMBO_NAME_QUESTION in replies[-1] and "Wallet -" in replies[-1] and "Keychain -" in replies[-1]
+              and "Pen -" in replies[-1], "asks one name for all items, or a name for each", replies)
         BOT_TURNS.append({"product_name": "Wallet: Aarav | Keychain: Riya | Pen: Dev", "charm": "5", "action": "collect"})
         msg("f2", F, "Wallet - Aarav\nKeychain - Riya\nPen - Dev\ncharm 5")
         wait_reply(F, 2)

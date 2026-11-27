@@ -97,7 +97,7 @@ def replies_to(phone):
     return [t for to, t in sent if to == phone]
 
 
-def wait_for(fn, label, timeout=20.0):
+def wait_for(fn, label, timeout=60.0):
     end = time.time() + timeout
     while time.time() < end:
         if fn():

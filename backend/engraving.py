@@ -165,3 +165,96 @@ def build_list_pdf(entries: List[Tuple[str, str]], pdf_name: str, width: float =
         writer.end_page()
     writer.close()
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# The .txt file for the laser engraver: names only, by how each item is engraved
+# ---------------------------------------------------------------------------
+TXT_SECTIONS = [
+    ("leather", "LEATHER (STRAP)"),
+    ("metal", "METAL KEYCHAIN"),
+    ("doctor", "DOCTOR KEYCHAIN"),
+    ("advocate", "ADVOCATE KEYCHAIN"),
+    ("ca", "CA KEYCHAIN"),
+    ("home", "HOME KEYCHAIN"),
+    ("pen", "PEN"),
+    ("bottle", "BOTTLE"),
+    ("bracelet", "BRACELET"),
+    ("chain", "NECK CHAIN"),
+    ("rakhi", "RAKHI"),
+    ("unknown", "OTHER / NOT CLEAR"),
+    ("missing", "NAME MISSING"),
+]
+LEATHER_ITEMS = {"wallet", "purse", "clutch", "passport cover", "leather keychain", "luggage tag", "sunglasses cover"}
+TXT_ITEM = {"pen": "pen", "bottle": "bottle", "bracelet": "bracelet", "chain": "chain", "rakhi": "rakhi"}
+
+
+def metal_kind(title: str) -> str:
+    """Which metal keychain heading a product title belongs under."""
+    t = (title or "").lower()
+    if re.search(r"\bdoctor\b|\bdr\b|\bmbbs\b|\bmedical\b", t):
+        return "doctor"
+    if re.search(r"advocate|\badv\b|lawyer|vakeel", t):
+        return "advocate"
+    if re.search(r"\bca\b|chartered", t):
+        return "ca"
+    if re.search(r"\bhome\b|\bhouse\b|ghar", t):
+        return "home"
+    return "metal"
+
+
+def txt_section(item: str, title: str) -> str:
+    if item in LEATHER_ITEMS:
+        return "leather"
+    if item in ("metal keychain", "keychain"):
+        return metal_kind(title)
+    return TXT_ITEM.get(item, "")
+
+
+def txt_blocks_for_page(orders: List[Dict[str, Any]], title: str, qty: int, detected: str) -> List[Tuple[str, List[str]]]:
+    """(section, lines) blocks for one label: each item's name, repeated for the quantity; a passport cover's
+    caption lines follow its name. A single name for a combo is listed under every item."""
+    if not orders:
+        return [("missing", [detected or "no order ID"])]
+    out: List[Tuple[str, List[str]]] = []
+    items_from_title = cat.items_in(title) if title else []
+    for o in orders:
+        name = (o.get("product_name") or "").strip()
+        if not name:
+            out.append(("missing", [o.get("order_id") or detected or "no order ID"]))
+            continue
+        try:
+            n = max(1, min(int(str(o.get("quantity") or "").strip() or qty), 50))
+        except ValueError:
+            n = qty
+        own = item_of(o)
+        items = [own] if own else (items_from_title or [])
+        sections = [txt_section(i, title) for i in items] if items else ["unknown"]
+        sections = [s for s in dict.fromkeys(sections) if s] or ([] if items else ["unknown"])
+        if items and not sections:
+            continue  # belt / card holder: nothing to engrave
+        caption = [ln.strip() for ln in (o.get("caption") or "").splitlines() if ln.strip()]
+        for sec in sections:
+            line = name if sec in ("leather", "pen", "bottle", "bracelet", "chain", "rakhi", "unknown") else sides(o)
+            lines = [line] + (caption if sec == "leather" and caption else [])
+            for _ in range(n):
+                out.append((sec, lines + ([""] if len(lines) > 1 else [])))
+    return out
+
+
+def build_txt(blocks: List[Tuple[str, List[str]]], pdf_name: str = "") -> str:
+    """Plain text for the laser software: headings, then the names one per line (CRLF for Windows tools)."""
+    by_sec: Dict[str, List[List[str]]] = {}
+    for sec, lines in blocks:
+        by_sec.setdefault(sec, []).append(lines)
+    parts: List[str] = []
+    for key, heading in TXT_SECTIONS:
+        if key not in by_sec:
+            continue
+        count = len(by_sec[key])
+        parts.append(f"{heading} ({count})")
+        for lines in by_sec[key]:
+            parts.extend(lines)
+        if parts[-1] != "":
+            parts.append("")
+    return "\r\n".join(parts).rstrip() + "\r\n" if parts else ""

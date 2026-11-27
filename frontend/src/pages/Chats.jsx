@@ -42,6 +42,7 @@ import {
   createOrder,
   waNumbers,
   setBotPaused,
+  confirmExtraCharms,
   errorMessage,
 } from "../lib/api";
 import { Input, Label, Textarea, Badge, Spinner } from "../components/ui/primitives";
@@ -56,7 +57,7 @@ import ChatMenu from "../components/ChatMenu";
 import TeamComposer from "../components/TeamComposer";
 import { useSession } from "../lib/session";
 
-const ORDER_FIELDS = ["order_id", "product_name", "colour", "charm", "quantity", "notes"];
+const ORDER_FIELDS = ["order_id", "product_name", "caption", "colour", "charm", "quantity", "notes"];
 const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const fmtDay = (iso) => new Date(iso).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
 const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -366,6 +367,7 @@ function OrderEditor({ order, onSaved, onConfirm }) {
         charm: form.charm,
         quantity: form.quantity || "",
         notes: form.notes,
+        caption: form.caption || "",
       });
       toast.success("Order saved");
       onSaved();
@@ -395,6 +397,7 @@ function OrderEditor({ order, onSaved, onConfirm }) {
       {[
         ["order_id", "Order ID", "font-mono"],
         ["product_name", "Name on product", ""],
+        ["caption", "Caption (passport cover)", ""],
         ["colour", "Colour", ""],
         ["charm", "Charm", ""],
         ["quantity", "Quantity", ""],
@@ -402,12 +405,36 @@ function OrderEditor({ order, onSaved, onConfirm }) {
       ].map(([k, l, cls]) => (
         <div key={k} className="space-y-1">
           <Label className="text-[10px]">{l}</Label>
-          <Input
-            data-testid={`order-${order.id}-${k}`}
-            value={form[k] || ""}
-            onChange={(e) => setForm({ ...form, [k]: e.target.value })}
-            className={cn("h-8 text-sm", cls)}
-          />
+          {k === "caption" ? (
+            <textarea
+              data-testid={`order-${order.id}-caption`}
+              rows={2}
+              placeholder="One line each, up to 4"
+              value={form.caption || ""}
+              onChange={(e) => setForm({ ...form, caption: e.target.value })}
+              className="w-full rounded-md border border-line px-2 py-1 text-sm"
+            />
+          ) : (
+            <Input
+              data-testid={`order-${order.id}-${k}`}
+              value={form[k] || ""}
+              onChange={(e) => setForm({ ...form, [k]: e.target.value })}
+              className={cn("h-8 text-sm", cls)}
+            />
+          )}
+          {k === "charm" && order.extra_charms && (
+            <div className="rounded-md bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800" data-testid={`order-extra-${order.id}`}>
+              + {order.extra_charms} · waiting for the ₹20 payment
+              <div className="mt-1 flex gap-1">
+                <button type="button" className="rounded bg-forest px-1.5 py-0.5 font-semibold text-white"
+                  onClick={async () => { try { await confirmExtraCharms(order.id, true); toast.success("Extra charm added to the label"); onSaved(); } catch (e) { toast.error(errorMessage(e)); } }}
+                  data-testid={`order-extra-confirm-${order.id}`}>Payment confirmed</button>
+                <button type="button" className="rounded border border-amber-300 px-1.5 py-0.5"
+                  onClick={async () => { try { await confirmExtraCharms(order.id, false); toast.success("Extra charm dropped"); onSaved(); } catch (e) { toast.error(errorMessage(e)); } }}
+                  data-testid={`order-extra-drop-${order.id}`}>Drop</button>
+              </div>
+            </div>
+          )}
         </div>
       ))}
       {dirty && (

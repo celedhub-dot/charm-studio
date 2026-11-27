@@ -434,6 +434,26 @@ try:
         check(orders(X) and orders(X)[0]["charm"] == "46 (Red heart)" and r[-1:] == [server.OFF_CHART_REPLY], "a number not on the chart (2721) is refused", (orders(X), r[-1:]))
 
         time.sleep(4)
+        print("Combo: names and charms per item, caption, extra charms")
+        K2 = "919000000319"
+        BOT_TURNS[K2] = [{"order_id": "357900000000001111", "action": "collect"}]
+        msg("k21", K2, "357900000000001111 wallet and passport cover combo")
+        r = wait_n(K2, 1)
+        check(server.COMBO_NAME_QUESTION in r[-1] and "Wallet -" in r[-1] and "Passport cover -" in r[-1],
+              "combo: asks one name for all, or a name for each", r[-1:])
+        BOT_TURNS[K2] = [{"product_name": "Aarav", "caption": "Happy journey", "charm": "Wallet: 52 | Passport cover: 46, 9, 5, 3",
+                          "action": "collect"}]
+        msg("k22", K2, "Aarav on both. Wallet charm 52, passport cover charms 46 9 5 3, caption Happy journey")
+        r = wait_n(K2, 2)
+        rows = {(o["notes"] or "").split(";")[0]: o for o in orders(K2)}
+        w, pc = rows.get("Item: Wallet"), rows.get("Item: Passport cover")
+        check(w and pc and w["product_name"] == pc["product_name"] == "Aarav", "one name saved on both items", rows)
+        check(w["charm"] == "52 (Om)" and pc["charm"] == "46 (Red heart), 9 (Doctor symbol), 5 (Infinity love)"
+              and pc["extra_charms"] == "3 (Crown)" and pc["caption"] == "Happy journey" and not w["caption"],
+              "each item its own charms; caption passport cover: 3 free, the 4th waits for payment", (w, pc))
+        check(server.EXTRA_CHARM_NOTE in r[-1] and "Caption: Happy journey" in r[-1], "the reply mentions the Rs 20 extra charm and the caption", r[-1:])
+
+        time.sleep(4)
         print("Shop facts reach the AI")
         c.put("/api/settings/bot", headers=H(tok), json={**{k: v for k, v in server.DEFAULT_SETTINGS["bot"].items() if k != "knowledge"},
                                                           "knowledge": "We print on both sides of metal keychains."})

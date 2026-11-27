@@ -105,6 +105,9 @@ CREATE INDEX IF NOT EXISTS orders_order_date_idx ON orders (order_date);
 -- Colour and quantity the customer chose (free text, as written)
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS colour   text NOT NULL DEFAULT '';
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity text NOT NULL DEFAULT '';
+-- Passport cover caption (up to 4 lines) and extra charms waiting for the Rs 20 payment to be confirmed by staff
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS caption text NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS extra_charms text NOT NULL DEFAULT '';
 
 -- Every WhatsApp message in and out (customer, bot, staff, or sent from the phone app).
 CREATE TABLE IF NOT EXISTS wa_messages (

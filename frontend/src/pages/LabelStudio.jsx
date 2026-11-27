@@ -15,9 +15,11 @@ import {
   PencilSimple,
   Trash,
   Copy,
+  FileText,
 } from "@phosphor-icons/react";
 import {
   analyzePdf,
+  engravingTxtFromFilled,
   annotatePdf,
   getExtractOptions,
   getOrders,
@@ -84,7 +86,8 @@ function PartialNote({ page }) {
   );
 }
 const REMOVED = { removed: true }; // details taken off this label: it prints without a box
-const DETAIL_KEYS = ["product_name", "charm", "colour", "quantity", "notes"];
+const DETAIL_KEYS = ["product_name", "caption", "charm", "colour", "quantity", "notes"];
+const NL = String.fromCharCode(10);
 
 /** The label page as it will print, with `details` in its box (or a red "not found" box, or no box). */
 function LabelPreview({ file, page, opts, details, className }) {
@@ -156,6 +159,7 @@ function OverrideDialog({ page, orders, currentId, current, file, opts, startTab
     charm: current?.charm || "",
     quantity: current?.quantity || "",
     notes: current?.notes || "",
+    caption: current?.caption || "",
   });
   const [saving, setSaving] = useState(false);
   const [confirmSave, setConfirmSave] = useState(false);
@@ -269,15 +273,26 @@ function OverrideDialog({ page, orders, currentId, current, file, opts, startTab
                 ["charm", "Charm"],
                 ["quantity", "Quantity"],
                 ["notes", "Notes"],
+                ["caption", "Caption (passport cover, one line each, up to 4)"],
               ].map(([k, l]) => (
-                <div key={k} className="space-y-1.5">
+                <div key={k} className={cn("space-y-1.5", k === "caption" && "sm:col-span-2")}>
                   <Label>{l}</Label>
-                  <Input
-                    data-testid={`override-new-${k}`}
-                    value={draft[k]}
-                    onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}
-                    className={k === "order_id" ? "font-mono" : ""}
-                  />
+                  {k === "caption" ? (
+                    <textarea
+                      data-testid="override-new-caption"
+                      rows={3}
+                      value={draft.caption}
+                      onChange={(e) => setDraft({ ...draft, caption: e.target.value.split(NL).slice(0, 4).join(NL) })}
+                      className="w-full rounded-lg border border-line bg-white px-3 py-2 text-sm"
+                    />
+                  ) : (
+                    <Input
+                      data-testid={`override-new-${k}`}
+                      value={draft[k]}
+                      onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}
+                      className={k === "order_id" ? "font-mono" : ""}
+                    />
+                  )}
                 </div>
               ))}
             </div>
@@ -319,6 +334,7 @@ export default function LabelStudio() {
   const [analysis, setAnalysis] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [makingTxt, setMakingTxt] = useState(false);
   const { settings, me } = useSession();
   const defaults = settings?.labels;
   const [position, setPosition] = useState(defaults?.position || "bottom-right");
@@ -339,6 +355,7 @@ export default function LabelStudio() {
   const [activePage, setActivePage] = useState(null);
   const [orders, setOrders] = useState([]);
   const inputRef = useRef(null);
+  const filledRef = useRef(null);
 
   const handleFile = async (f) => {
     if (!f) return;
@@ -377,8 +394,8 @@ export default function LabelStudio() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [analysis, overrides]);
 
-  const generate = async () => {
-    setGenerating(true);
+  const generate = async (output = "pdf") => {
+    output === "txt" ? setMakingTxt(true) : setGenerating(true);
     try {
       const ov = Object.fromEntries(Object.entries(overrides).map(([pg, o]) => [pg, o === REMOVED ? "__none__" : o.id]));
       if (model) {
@@ -386,7 +403,12 @@ export default function LabelStudio() {
           ov[page.page] ??= page.status === "matched" ? page.matches[0].id : "__unmatched__";
         }
       }
-      const res = await annotatePdf(file, { position, skipUnmatched, fontSize, overrides: ov, engravingList });
+      const res = await annotatePdf(file, { position, skipUnmatched, fontSize, overrides: ov, engravingList, output });
+      if (output === "txt") {
+        downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "engraving.txt"));
+        toast.success("Engraving .txt downloaded");
+        return;
+      }
       const name = filenameFromDisposition(res.headers["content-disposition"], `annotated_${file.name}`);
       downloadBlob(res.data, name);
       const matched = res.headers["x-matched-pages"] ?? "?";
@@ -405,6 +427,29 @@ export default function LabelStudio() {
       toast.error(msg);
     } finally {
       setGenerating(false);
+      setMakingTxt(false);
+    }
+  };
+
+  const txtFromFilled = async (f) => {
+    if (!f) return;
+    setMakingTxt(true);
+    try {
+      const res = await engravingTxtFromFilled(f);
+      downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "engraving.txt"));
+      toast.success("Engraving .txt downloaded");
+    } catch (e) {
+      let msg = errorMessage(e);
+      if (e?.response?.data instanceof Blob) {
+        try {
+          msg = JSON.parse(await e.response.data.text()).detail || msg;
+        } catch {
+          /* keep default */
+        }
+      }
+      toast.error(msg);
+    } finally {
+      setMakingTxt(false);
     }
   };
 
@@ -427,6 +472,17 @@ export default function LabelStudio() {
           )
         }
       />
+      {!file && <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-white p-4">
+        <div className="text-sm">
+          <span className="font-semibold">Already have a filled label PDF?</span>{" "}
+          <span className="text-muted">Upload it to get the engraving names as a .txt for the laser.</span>
+        </div>
+        <Button variant="outline" disabled={makingTxt} onClick={() => filledRef.current?.click()} data-testid="filled-txt-btn">
+          {makingTxt ? <Spinner /> : <FileText size={16} />} .txt from filled PDF
+        </Button>
+        <input ref={filledRef} type="file" accept="application/pdf,.pdf" hidden data-testid="filled-txt-input"
+          onChange={(e) => { txtFromFilled(e.target.files?.[0]); e.target.value = ""; }} />
+      </div>}
       {!file && <div className="mb-5 flex flex-wrap gap-4 rounded-xl border border-line bg-white p-4">
         <label>Label reader <select className="ml-2 rounded border p-2" value={model} onChange={e => setModel(e.target.value)}>
           <option value="">Standard order matching (no AI charge)</option>
@@ -519,9 +575,15 @@ export default function LabelStudio() {
                   </div>
                 </div>
               </div>
-              <Button variant="accent" size="lg" onClick={generate} disabled={generating} data-testid="generate-pdf-btn">
-                {generating ? <Spinner /> : <DownloadSimple size={18} />} Generate &amp; Download PDF
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="lg" onClick={() => generate("txt")} disabled={makingTxt || generating} data-testid="generate-txt-btn"
+                  title="Names to engrave as a .txt for the laser: leather (strap) names, then each metal item under its own heading">
+                  {makingTxt ? <Spinner /> : <FileText size={18} />} Engraving .txt
+                </Button>
+                <Button variant="accent" size="lg" onClick={() => generate()} disabled={generating} data-testid="generate-pdf-btn">
+                  {generating ? <Spinner /> : <DownloadSimple size={18} />} Generate &amp; Download PDF
+                </Button>
+              </div>
             </CardContent>
           </Card>
 
@@ -579,6 +641,7 @@ export default function LabelStudio() {
                       {order ? (
                         <div className="rounded-xl border border-forest/15 bg-forest-50/60 p-3 text-sm">
                           <div className="truncate"><span className="text-muted">Name:</span> {order.product_name || "—"}</div>
+                          {order.caption && <div className="whitespace-pre-line text-xs text-muted">{order.caption}</div>}
                           <div className="truncate"><span className="text-muted">Charm:</span> {order.charm || "—"}
                             {order.colour && <span className="text-muted"> · {order.colour}</span>}
                             {order.quantity && order.quantity !== "1" && <span className="text-muted"> · Qty {order.quantity}</span>}

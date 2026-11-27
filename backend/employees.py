@@ -24,9 +24,9 @@ ENDPOINTS = {
     "inbox_send": ("chats", "text"), "inbox_bot_pause": ("chats", "text"), "inbox_send_media": ("chats", "media"),
     "inbox_templates": ("templates",), "inbox_send_template": ("chats", "templates"),
     "list_orders": ("orders",), "create_order": ("create",), "bulk_orders": ("create",),
-    "update_order": ("edit",), "export_orders_csv": ("exports", "orders"),
+    "update_order": ("edit",), "confirm_extra_charms": ("edit",), "export_orders_csv": ("exports", "orders"),
     "orders_sheet": ("exports", "orders"), "inbox_export_chat": ("exports", "chats"),
     "stats": ("dashboard",), "extract": ("extract",), "extract_bulk_file": ("extract",),
-    "pdf_analyze": ("labels",), "pdf_annotate": ("labels",), "pdf_preview": ("labels",),
+    "pdf_analyze": ("labels",), "pdf_annotate": ("labels",), "engraving_txt_from_filled": ("labels",), "pdf_preview": ("labels",),
     "list_wa_numbers": ("chats",), "team_post": ("chats", "team"), "team_file": ("chats", "team"), "get_settings": (), "extract_options": (),
 }

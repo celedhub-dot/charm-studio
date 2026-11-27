@@ -27,6 +27,7 @@ import {
   bulkOrders,
   exportOrdersCsv,
   downloadOrderSheet,
+  confirmExtraCharms,
   errorMessage,
 } from "../lib/api";
 import { PageHeader, SourceBadge, EmptyState, EditableRows } from "../components/common";
@@ -268,7 +269,17 @@ export default function Orders() {
 
   const startEdit = (o) => {
     setEditingId(o.id);
-    setEditDraft({ order_id: o.order_id, product_name: o.product_name, colour: o.colour || "", charm: o.charm, quantity: o.quantity || "", notes: o.notes });
+    setEditDraft({ order_id: o.order_id, product_name: o.product_name, colour: o.colour || "", charm: o.charm, quantity: o.quantity || "", notes: o.notes, caption: o.caption || "" });
+  };
+
+  const extraCharms = async (o, confirm) => {
+    try {
+      const updated = await confirmExtraCharms(o.id, confirm);
+      setOrders((list) => list.map((x) => (x.id === updated.id ? updated : x)));
+      toast.success(confirm ? "Payment confirmed: extra charm added to the label" : "Extra charm dropped");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
   };
 
   const saveEdit = async () => {
@@ -498,6 +509,16 @@ export default function Orders() {
                             onChange={(e) => setEditDraft({ ...editDraft, [k]: e.target.value })}
                             className={k === "quantity" ? "h-9 w-16" : "h-9 min-w-[110px]"}
                           />
+                          {k === "product_name" && (
+                            <textarea
+                              data-testid="edit-caption-input"
+                              rows={2}
+                              placeholder="Caption (passport cover), one line each"
+                              value={editDraft.caption || ""}
+                              onChange={(e) => setEditDraft({ ...editDraft, caption: e.target.value })}
+                              className="mt-1 w-full min-w-[110px] rounded-md border border-line px-2 py-1 text-xs"
+                            />
+                          )}
                         </TD>
                       ))}
                       <TD className="whitespace-nowrap font-mono text-xs text-muted">{o.customer_phone ? `+${o.customer_phone}` : "—"}</TD>
@@ -532,9 +553,25 @@ export default function Orders() {
                           )}
                         </span>
                       </TD>
-                      <TD className="max-w-[200px]" title={o.product_name}><span className="line-clamp-3">{o.product_name || <span className="text-muted">—</span>}</span></TD>
+                      <TD className="max-w-[200px]" title={o.product_name}>
+                        <span className="line-clamp-3">{o.product_name || <span className="text-muted">—</span>}</span>
+                        {o.caption && <span className="mt-0.5 block whitespace-pre-line text-[11px] text-muted" title="Caption">{o.caption}</span>}
+                      </TD>
                       <TD className="max-w-[90px]">{o.colour || <span className="text-muted">—</span>}</TD>
-                      <TD className="max-w-[130px]">{o.charm || <span className="text-muted">—</span>}</TD>
+                      <TD className="max-w-[150px]">
+                        {o.charm || <span className="text-muted">—</span>}
+                        {o.extra_charms && (
+                          <div className="mt-1 rounded-md bg-amber-50 px-1.5 py-1 text-[11px] text-amber-800" data-testid={`extra-charms-${o.id}`}>
+                            <div title="Extra charms are Rs 20 each: added after the payment screenshot is checked">+ {o.extra_charms} · waiting for ₹20 payment</div>
+                            {can("edit") && (
+                              <div className="mt-1 flex gap-1">
+                                <button type="button" className="rounded bg-forest px-1.5 py-0.5 font-semibold text-white" onClick={() => extraCharms(o, true)} data-testid={`extra-confirm-${o.id}`}>Payment confirmed</button>
+                                <button type="button" className="rounded border border-amber-300 px-1.5 py-0.5" onClick={() => extraCharms(o, false)} data-testid={`extra-drop-${o.id}`}>Drop</button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </TD>
                       <TD className="tabular-nums">{o.quantity || <span className="text-muted">—</span>}</TD>
                       <TD className="max-w-[240px] truncate text-xs" title={o.notes}>
                         {o.notes || <span className="text-muted">—</span>}
