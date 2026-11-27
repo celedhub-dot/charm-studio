@@ -27,6 +27,8 @@ import {
   PushPin,
   BellSlash,
   UsersThree,
+  Pause,
+  Play,
 } from "@phosphor-icons/react";
 import {
   getConversations,
@@ -39,6 +41,7 @@ import {
   updateOrder,
   createOrder,
   waNumbers,
+  setBotPaused,
   errorMessage,
 } from "../lib/api";
 import { Input, Label, Textarea, Badge, Spinner } from "../components/ui/primitives";
@@ -517,6 +520,7 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
     return () => URL.revokeObjectURL(url);
   }, [file]);
   const [sending, setSending] = useState(false);
+  const [pausing, setPausing] = useState(false);
   const [panel, setPanel] = useState(null); // null (orders on wide screens) | "orders" | "info"
   const [tplFor, setTplFor] = useState(null); // { order, confirmation } while the template dialog is open
 
@@ -557,6 +561,20 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
     const limit = f.type.startsWith("image/") ? 5 : 16;
     if (f.size > limit * 1024 * 1024) return toast.error(`That file is ${fmtSize(f.size)}. WhatsApp allows up to ${limit} MB for this type.`);
     setFile(f);
+  };
+
+  const toggleBot = async () => {
+    const pause = !contact.bot_paused_at;
+    setPausing(true);
+    try {
+      const r = await setBotPaused(contact.number_label, contact.customer_phone, pause);
+      setThread((t) => (t ? { ...t, contact: { ...t.contact, ...r } } : t));
+      toast.success(pause ? "Bot paused in this chat. It still reads order screenshots." : "Bot resumed in this chat");
+    } catch (err) {
+      toast.error(errorMessage(err, "Couldn't change the bot for this chat"));
+    } finally {
+      setPausing(false);
+    }
   };
 
   const removeChat = async () => {
@@ -624,6 +642,22 @@ function Thread({ sel, onBack, onSent, onDeleted }) {
           >
             <Clock size={11} /> {contact.window_open ? `Reply window ${left >= 1 ? `${Math.floor(left)}h` : `${Math.ceil(left * 60)}m`} left` : "Reply window closed"}
           </Badge>}
+          {!group && number.bot_mode && number.bot_mode !== "off" && !contact.saved_contact && (
+            <button
+              type="button"
+              disabled={pausing}
+              onClick={toggleBot}
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold",
+                contact.bot_paused_at ? "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100" : "border-line bg-white text-[#54656F] hover:bg-black/5"
+              )}
+              title={contact.bot_paused_at ? `Bot paused${contact.bot_paused_by ? ` by ${contact.bot_paused_by}` : ""}: click to let the bot reply again` : "Pause the bot in this chat while your team replies"}
+              data-testid="bot-pause-btn"
+            >
+              {contact.bot_paused_at ? <Play size={13} weight="fill" /> : <Pause size={13} weight="fill" />}
+              {contact.bot_paused_at ? "Bot paused · Resume" : "Pause bot"}
+            </button>
+          )}
           {!group && <button
             type="button"
             className={cn("relative rounded-full p-2 text-[#54656F] hover:bg-black/5", panel === "orders" && "bg-black/5")}

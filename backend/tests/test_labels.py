@@ -139,8 +139,11 @@ check([o["id"] for o in m] == ["a"] and server.label_status(["346654813867976704
 m = server.match_orders(["346653638624478272_1"], saved)
 check([o["id"] for o in m] == ["c"], "an exact _1 match wins over the plain number")
 m = server.match_orders(["346654813867976705_1"], saved)
-check(m == [] and server.label_status(["346654813867976705_1"], m) == "not_found", "one wrong digit still matches nobody")
+check([o["id"] for o in m] == ["a"] and server.label_status(["346654813867976705_1"], m) == "matched"
+      and server.partial_digits(["346654813867976705_1"], m) == 17, "one wrong digit late in the ID: matched on the first 17 digits (with a note)")
+check(server.match_orders(["346600000000000000_1"], saved) == [], "fewer than 8 shared digits: no match")
 check(server.match_orders(["346654813867976704_2"], saved)[0]["id"] == "a", "_2 label of the same purchase order finds it too")
-check(server.match_orders(["OD439161640237637101"], saved) == [], "Flipkart OD: exact only")
+m = server.match_orders(["OD439161640237637101"], saved)
+check([o["id"] for o in m] == ["b"] and server.partial_digits(["OD439161640237637101"], m) == 17, "Flipkart OD: first 8+ digits match too")
 
 print(f"\nALL {passed} CHECKS PASSED")

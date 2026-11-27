@@ -218,7 +218,10 @@ async def test_guide():
         photo.reset_mock()
         with patch.object(server, "CHARM_CHART", actual_guide):  # (any jpg stands in for the chart here)
             messages, _, _ = await run(["123456789012_1"])
-        # the Order ID is there: no example picture, but the charm question comes with the charm chart
+            # product unknown: it asks which product first, and sends no chart (a kada takes no charm)
+            assert photo.await_count == 0 and server.screenshot_again() in messages[-1], messages
+            messages, _, _ = await run(["123456789012_1 wallet"])
+        # the Order ID and a charm product are there: no example picture, the charm question comes with the chart
         assert photo.await_count == 1 and photo.await_args.kwargs["text"].startswith(server.CHARM_CHART_NOTE), photo.await_args
         assert actual_guide.read_bytes()[:3] == bytes.fromhex("ffd8ff")
 

@@ -259,3 +259,6 @@ ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS guide_sent_at timestamptz;
 
 -- When the charm chart picture was sent to this customer (with the charm question)
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS charm_chart_sent_at timestamptz;
+-- Bot paused in this chat by staff (until someone resumes it); screenshots are still read quietly
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS bot_paused_at timestamptz;
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS bot_paused_by text NOT NULL DEFAULT '';

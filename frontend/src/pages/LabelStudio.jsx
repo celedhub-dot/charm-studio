@@ -14,6 +14,7 @@ import {
   Eye,
   PencilSimple,
   Trash,
+  Copy,
 } from "@phosphor-icons/react";
 import {
   analyzePdf,
@@ -49,6 +50,39 @@ const STATUS = {
   no_id: { label: "No ID", variant: "neutral", icon: MinusCircle },
   removed: { label: "No box", variant: "neutral", icon: MinusCircle },
 };
+/** Order IDs printed on the label, each with a copy button (copies exactly what the label prints). */
+function CopyIds({ ids }) {
+  return ids.map((id, i) => (
+    <span key={id} className="inline-flex items-center gap-0.5">
+      {i > 0 && <span className="text-muted">, </span>}
+      <span className="font-mono text-ink">{id}</span>
+      <button
+        type="button"
+        title={`Copy ${id}`}
+        aria-label={`Copy order ID ${id}`}
+        data-testid={`copy-id-${id}`}
+        className="rounded p-0.5 text-muted hover:bg-sand hover:text-ink"
+        onClick={(e) => {
+          e.stopPropagation();
+          navigator.clipboard?.writeText(id).then(() => toast.success(`Copied ${id}`), () => toast.error("Could not copy"));
+        }}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        <Copy size={13} />
+      </button>
+    </span>
+  ));
+}
+
+/** "Matched on the first 12 digits": the saved order's ID differs from the label after that. */
+function PartialNote({ page }) {
+  if (!page?.match_digits) return null;
+  return (
+    <div className="rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800" data-testid={`partial-${page.page}`}>
+      Matched on the first {page.match_digits} digits: saved as {page.match_order_id}. Please check.
+    </div>
+  );
+}
 const REMOVED = { removed: true }; // details taken off this label: it prints without a box
 const DETAIL_KEYS = ["product_name", "charm", "colour", "quantity", "notes"];
 
@@ -162,7 +196,7 @@ function OverrideDialog({ page, orders, currentId, current, file, opts, startTab
           <DialogDescription>
             {page?.detected_ids?.length ? (
               <>
-                Detected ID: <span className="font-mono text-ink">{page.detected_ids.join(", ")}</span>
+                Detected ID: <CopyIds ids={page.detected_ids} />
               </>
             ) : (
               "No order ID was detected on this page."
@@ -535,12 +569,13 @@ export default function LabelStudio() {
                       <div className="text-xs text-muted">
                         {p.detected_ids.length ? (
                           <>
-                            ID <span className="font-mono text-ink">{p.detected_ids.join(", ")}</span>
+                            ID <CopyIds ids={p.detected_ids} />
                           </>
                         ) : (
                           "No ID detected"
                         )}
                       </div>
+                      {st === "matched" && <PartialNote page={p} />}
                       {order ? (
                         <div className="rounded-xl border border-forest/15 bg-forest-50/60 p-3 text-sm">
                           <div className="truncate"><span className="text-muted">Name:</span> {order.product_name || "—"}</div>
@@ -588,6 +623,12 @@ export default function LabelStudio() {
           <DialogContent className="max-w-3xl">
             <DialogHeader>
               <DialogTitle>Page {previewPage.page}: print preview</DialogTitle>
+              {previewPage.detected_ids?.length > 0 && (
+                <div className="text-xs text-muted">
+                  Label ID: <CopyIds ids={previewPage.detected_ids} />
+                </div>
+              )}
+              {pageStatus(previewPage) === "matched" && <PartialNote page={previewPage} />}
               <DialogDescription>
                 {orderFor(previewPage)
                   ? `Order ${orderFor(previewPage).order_id}`

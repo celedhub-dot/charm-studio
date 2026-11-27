@@ -165,6 +165,7 @@ export const getThread = (label, phone) => api.get(threadPath(label, phone)).the
 export const deleteChat = (label, phone) => api.delete(threadPath(label, phone)).then((r) => r.data);
 // { pinned, muted, archived, unread }: any of them, true/false
 export const setChatState = (label, phone, state) => api.patch(threadPath(label, phone), state).then((r) => r.data);
+export const setBotPaused = (label, phone, paused) => api.post(`${threadPath(label, phone)}/bot-pause`, { paused }).then((r) => r.data);
 export const clearChat = (label, phone) => api.post(`${threadPath(label, phone)}/clear`).then((r) => r.data);
 // Saved contacts: the bot never replies to them or reads their chats
 export const getSavedContacts = () => api.get("/saved-contacts").then((r) => r.data);

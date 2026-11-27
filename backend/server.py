@@ -180,7 +180,7 @@ DEFAULT_SETTINGS: Dict[str, Dict[str, Any]] = {
     "shop": {"shop_name": ""},
     "bot": {
         "knowledge": "",
-        "ask_order_id": "Hi! Please send your Order ID.",
+        "ask_order_id": "Hi! Please send a screenshot of your {platform} order details page. It shows your Order ID and product.",
         "ask_product_name": "What name should we print on the product?",
         "ask_charm": "Which charm would you like?",
         "ask_notes": "Any notes? Reply 'none' to skip.",
@@ -415,7 +415,33 @@ def _recent(store: Dict[str, List[float]], key: str, window: float) -> List[floa
 
 
 employee_permissions = ContextVar("employee_permissions", default=None)
-current_user = ContextVar("current_user", default="owner")  # "owner" or the employee's username
+current_user = ContextVar("current_user", default="owner")
+chat_platform = ContextVar("chat_platform", default="")  # "Meesho" / "Flipkart" for the number the bot is answering on
+
+
+def platform_of(label: str) -> str:
+    """'Meestuffs Meesho' -> 'Meesho', 'Meestuffs Flipkart' -> 'Flipkart'; other numbers mention both."""
+    low = (label or "").lower()
+    if "meesho" in low and "flipkart" not in low:
+        return "Meesho"
+    if "flipkart" in low and "meesho" not in low:
+        return "Flipkart"
+    return ""
+
+
+_BOTH_PLATFORMS = re.compile(r"\b(?:Meesho\s*(?:or|/|and|&)\s*Flipkart|Flipkart\s*(?:or|/|and|&)\s*Meesho)\b", re.I)
+
+
+def platform_line() -> str:
+    p = chat_platform.get()
+    return (f"This chat is on the shop's {p} number: mention only {p} (its app, order page, Order ID), never "
+            "another marketplace.\n") if p else ""
+
+
+def one_platform(text: str) -> str:
+    """On the Meesho number only Meesho is mentioned, on the Flipkart number only Flipkart."""
+    p = chat_platform.get()
+    return _BOTH_PLATFORMS.sub(p, text) if p and text else text  # "owner" or the employee's username
 
 
 def user_display() -> str:
@@ -871,13 +897,20 @@ class TestSendIn(BaseModel):
     text: str
 
 
+def clean_order_id(value: Any) -> str:
+    """Spaces, a leading '#' and a typed 'Order#' / 'Order ID:' label never belong to the ID."""
+    v = re.sub(r"\s+", "", str(value or ""))
+    v = re.sub(r"^(?:sub)?order(?:id|no\.?|number)?[#:.\-]*(?=(?:OD)?\d)", "", v, flags=re.I)
+    return v.lstrip("#:")
+
+
 def build_order(data: Dict[str, Any]) -> Dict[str, Any]:
     source = str(data.get("source") or "manual")
     if source not in SOURCES:
         source = "manual"
     return {
         "id": str(uuid.uuid4()),
-        "order_id": re.sub(r"\s+", "", str(data.get("order_id") or "")).lstrip("#"),  # "#3571 2345..." -> "35712345..."
+        "order_id": clean_order_id(data.get("order_id")),  # "#3571 2345..." / "Order#3571..." -> "35712345..."
         "product_name": str(data.get("product_name") or "").strip(),
         "charm": str(data.get("charm") or "").strip(),
         "notes": str(data.get("notes") or "").strip(),
@@ -1042,6 +1075,9 @@ def order_filters(
         if len(wanted) >= 4:
             args.append(f"%{wanted}%")
             extra += f" OR regexp_replace(upper(order_id), '[^A-Z0-9]', '', 'g') LIKE ${len(args)}"
+        if id_prefix(q):  # Rule: an order ID matches on its first 8 digits (the rest may be mistyped)
+            args.append(id_prefix(q) + "%")
+            extra += f" OR regexp_replace(order_id, '[^0-9]', '', 'g') LIKE ${len(args)}"
         conds.append(f"(order_id ILIKE ${i} OR product_name ILIKE ${i} OR charm ILIKE ${i} OR notes ILIKE ${i} OR colour ILIKE ${i} OR customer_phone ILIKE ${i}{extra})")
     if phone and phone.strip():
         digits = re.sub(r"\D", "", phone)
@@ -1054,7 +1090,11 @@ def order_filters(
         if not wanted:
             raise HTTPException(400, "Order ID filter: type letters or digits of the ID.")
         args.append(f"%{wanted}%")
-        conds.append(f"regexp_replace(upper(order_id), '[^A-Z0-9]', '', 'g') LIKE ${len(args)}")
+        cond = f"regexp_replace(upper(order_id), '[^A-Z0-9]', '', 'g') LIKE ${len(args)}"
+        if id_prefix(order_id):  # Rule: the first 8 digits are enough
+            args.append(id_prefix(order_id) + "%")
+            cond = f"({cond} OR regexp_replace(order_id, '[^0-9]', '', 'g') LIKE ${len(args)})"
+        conds.append(cond)
     # Dates: the marketplace order date when known, otherwise when the order was saved.
     shift = timedelta(minutes=max(-720, min(tz, 840)))
     if start:
@@ -1680,6 +1720,32 @@ def norm_id(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", s or "").upper()
 
 
+MIN_ID_DIGITS = 8  # an order ID matches when at least its first 8 digits are the same
+
+
+def id_digits(s: str) -> str:
+    return re.sub(r"\D", "", s or "")
+
+
+def id_prefix(q: str) -> str:
+    """The first 8 digits of a typed order ID ('' when it has fewer), for search."""
+    d = id_digits(q)
+    return d[:MIN_ID_DIGITS] if len(d) >= MIN_ID_DIGITS else ""
+
+
+def id_text_regex(prefix: str) -> str:
+    """Postgres regex finding those digits in a message, even typed with spaces/dashes ('3572 5149 ...')."""
+    return r"(^|[^0-9])" + r"[ ._-]{0,2}".join(prefix)
+
+
+def shared_digits(a: str, b: str) -> int:
+    a, b = id_digits(a), id_digits(b)
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return n
+
+
 def ids_match(a: str, b: str) -> bool:
     a, b = norm_id(a), norm_id(b)
     if not a or not b:
@@ -1744,7 +1810,37 @@ def match_orders(detected: List[str], orders: List[Dict[str, Any]]) -> List[Dict
     # Meesho customers often send the purchase-order number without the "_1" sub-order ending that the label
     # prints. Accept a saved order whose ID is exactly that number (every digit equal; no fuzzy matching).
     bases = {k.rsplit("_", 1)[0] for k in keys if re.fullmatch(r"\d{12,}_\d+", k)}
-    return [order for order in orders if key(order.get("order_id") or "") in bases]
+    based = [order for order in orders if key(order.get("order_id") or "") in bases]
+    if based:
+        return based
+    # The same digits saved with other characters ("Order#3571..."): an exact match too.
+    digit_keys = {id_digits(k) for k in keys} | {id_digits(re.sub(r"_\d+$", "", k)) for k in keys}
+    digit_keys = {d for d in digit_keys if len(d) >= 12}
+    same = [o for o in orders if id_digits(o.get("order_id") or "") in digit_keys]
+    if same:
+        return same
+    # Rule: the customer's saved ID has the label's first 8+ digits (they mistyped or cut the rest).
+    # The longest shared start wins; different orders tied on it come back together (label_status: needs review).
+    best, found = 0, []
+    for order in orders:
+        n = max((shared_digits(k, order.get("order_id") or "") for k in keys), default=0)
+        if n >= MIN_ID_DIGITS and n > best:
+            best, found = n, [order]
+        elif n >= MIN_ID_DIGITS and n == best:
+            found.append(order)
+    return found
+
+
+def partial_digits(detected: List[str], matches: List[Dict[str, Any]]) -> int:
+    """How many leading digits a first-8-digits match shares (0 when the IDs are the same)."""
+    if not matches or not detected:
+        return 0
+    saved = id_digits(matches[0].get("order_id") or "")
+    for d in detected:
+        label = id_digits(d)
+        if label == saved or (label.startswith(saved) and re.search(r"[_-]\d+$", d.strip()) and len(saved) >= 12):
+            return 0
+    return max(shared_digits(d, matches[0].get("order_id") or "") for d in detected)
 
 
 def label_status(detected, matches):
@@ -1809,6 +1905,9 @@ async def pdf_analyze(file: UploadFile = File(...), model: str = Form(""), effor
                     "matches": matches,
                     "label_date": label_date.isoformat() if label_date else None,
                     "status": status,
+                    # matched on the first N digits only: the card says so, to be checked
+                    "match_digits": partial_digits(detected, matches) if status == "matched" else 0,
+                    "match_order_id": matches[0]["order_id"] if matches and status == "matched" else "",
                     "thumbnail": "data:image/png;base64," + base64.b64encode(pix.tobytes("png")).decode(),
                 }
             )
@@ -2287,7 +2386,8 @@ SKIP_WORDS = {"none", "no", "skip", "-", "nil", "na", "n/a"}
 
 def bot_text(key: str) -> str:
     """A bot message from Settings (falls back to the default wording)."""
-    return (SETTINGS.get("bot") or {}).get(key) or DEFAULT_SETTINGS["bot"][key]
+    text = (SETTINGS.get("bot") or {}).get(key) or DEFAULT_SETTINGS["bot"][key]
+    return text.replace("{platform}", chat_platform.get() or "Meesho or Flipkart")
 
 
 def bot_question(step: int) -> str:
@@ -2295,7 +2395,18 @@ def bot_question(step: int) -> str:
 
 
 FEWER_FOLLOWUPS = os.environ.get("BOT_FEWER_FOLLOWUPS", "true").lower() == "true"
-ORDER_ID_GUIDE = Path(__file__).with_name("order-id-guide.jpg")
+ORDER_ID_GUIDE = Path(__file__).with_name("order-id-guide.jpg")  # a Flipkart order page (also numbers selling on both)
+ORDER_ID_GUIDE_MEESHO = Path(__file__).with_name("order-id-guide-meesho.jpg")  # a Meesho order page
+
+
+PRODUCT_QUESTION = ("Which product did you order (for example wallet, keychain, kada, pen)? "
+                    "If it takes a charm, please send the charm number too.")
+SCREENSHOT_AGAIN = "Thanks! Please also send a screenshot of this order from your {platform} app, so we know which product it is."
+
+
+def screenshot_again() -> str:
+    """A typed Order ID and the product still unknown: ask once for the order screenshot (then: which product)."""
+    return SCREENSHOT_AGAIN.replace("{platform}", chat_platform.get() or "Meesho or Flipkart")
 
 
 def missing_questions(fields: Dict[str, str]) -> str:
@@ -2307,6 +2418,12 @@ def missing_questions(fields: Dict[str, str]) -> str:
             names = combo_names(fields)
             missing = [i for i in fields["_items"].split(",") if not names.get(i)]
             lines.append("Please send the name for each item:\n" + "\n".join(f"{item_label(i)} -" for i in missing))
+        elif key == "charm" and not fields.get("_product") and not fields.get("charm"):
+            # product unknown: a kada, pen or metal keychain takes no charm, so find the product first.
+            # While the Order ID is missing, the first question already asks for the order screenshot (it shows the product).
+            if not step_filled(fields, "order_id"):
+                continue
+            lines.append(screenshot_again() if not fields.get("_shot_asked") else PRODUCT_QUESTION)
         elif key == "charm" and fields.get("_charm_pick"):
             nums = fields["_charm_pick"].split(",")
             lines.append(f"Which one? Please send the charm number: {', '.join(nums[:-1])} or {nums[-1]} (see the charm chart).")
@@ -2318,7 +2435,7 @@ def missing_questions(fields: Dict[str, str]) -> str:
 CHARM_CHART = Path(__file__).with_name("charm-chart.jpg")
 CHARM_CHART_NOTE = "\U0001F48E Our charm chart: send the number of the charm you'd like."
 CHARM_HELP_RE = re.compile(
-    r"charm.{0,40}(?:option|list|kaun|konsa|kon sa|which|show|photo|pic|chart|dikha|bhej|kya hai|kya h\b|what|meaning|matlab|design)"
+    r"charm.{0,40}(?:option|list|kaun|konsa|kon sa|which|show|photo|pic|chart|dikha|bhej|kya hai|kya h\b|what|mean|matlab|design)"
     r"|(?:option|list|show|dikha|bhej|photo|pic|chart|what is|kya hai|matlab).{0,30}charm", re.I)
 
 
@@ -2327,10 +2444,42 @@ CHARM_DOUBT_RE = re.compile(
     r"|(?:wrong|galat|different|alag|change|badal|not this|ye nahi).{0,30}charm", re.I)
 
 
+def off_chart(value: str) -> bool:
+    """A bare number that isn't on the charm chart (1-55), e.g. '2721'."""
+    v = (value or "").strip().lstrip("#")
+    return v.isdigit() and int(v) not in charms.CHARMS
+
+
+NO_CHARM_REPLY = "This product doesn't take a charm. We only print the name on it."
+OFF_CHART_REPLY = "Our charm chart has numbers 1 to 55. Please send the number of the charm you'd like from the chart."
+
+
+async def chat_product(biz: str, customer: str) -> Dict[str, str]:
+    """What this chat's product needs (from an order screenshot, else the customer's own words), for saved orders."""
+    rows = await db().fetch(
+        "SELECT body, ai_note FROM wa_messages WHERE number_label=$1 AND customer_phone=$2 AND direction='in' "
+        "ORDER BY created_at DESC LIMIT 60", biz, customer)
+    found: Dict[str, str] = {}
+    for r in rows:
+        m = re.search(r"Product: ([^|\n]+)", r["ai_note"] or "")
+        if m:
+            apply_product(found, m.group(1).strip())
+            return found
+    for r in rows:
+        txt = r["body"] or ""
+        if txt and len(txt) < 300 and cat.items_in(txt):
+            apply_product(found, txt, from_words=True)
+            return found
+    return found
+
+
 def apply_charm(fields: Dict[str, str]) -> None:
     """A charm name/number from the chart becomes '52 (Om)'; a name that fits several charms asks which number."""
     value = (fields.get("charm") or "").strip()
     if not value or fields.get("_charm_ok") == value:
+        return
+    if off_chart(value):
+        fields.pop("charm", None)  # e.g. "2721": not on the chart, ask again
         return
     picked, options = charms.resolve(value)
     if picked:
@@ -2393,15 +2542,23 @@ S_CODE_REPLY = ("This number (starting with S-) is not your Order ID. Please sen
                 "Meesho order details, as in this picture.")
 
 
-def product_needs(title: str):
-    """(what the bot must collect, the catalogue title it matched) for a product title from a screenshot."""
+def product_needs(title: str, from_words: bool = False):
+    """(what the bot must collect, the catalogue title it matched) for a product title from a screenshot.
+
+    from_words: the title is the customer's own words ("on keychain"). A catalogue listing may then only be
+    used if it names the same items; it never adds an item the customer didn't mention (a wallet combo)."""
     match = cat.best_match(title, CATALOGUE)
+    if match and from_words and set(cat.items_in(match["title"])) - set(cat.items_in(title)):
+        match = None
     name = match["title"] if match else title
     return cat.needs_for(name), name
 
 
-def apply_product(fields: Dict[str, str], title: str) -> None:
-    needs, name = product_needs(title)
+ONLY_ITEMS_RE = re.compile(r"\bonly\b|\bsirf\b|\bjust\b|\bnot\s+(?:a\s+)?(?:wallet|purse|pen|combo)|\bno\s+(?:wallet|purse|pen|combo)", re.I)
+
+
+def apply_product(fields: Dict[str, str], title: str, from_words: bool = False) -> None:
+    needs, name = product_needs(title, from_words)
     fields["_product"] = name[:200]
     for k in ("_no_name", "_no_charm", "_items", "_logo_ok", "_colour_ok"):
         fields.pop(k, None)
@@ -2657,22 +2814,23 @@ async def bot_input(cfg: Dict[str, Any], label: str, customer: str, since: datet
     return "\n".join(x for x in parts if x)
 
 
-GUIDE_NOTE = "\U0001F4CC Example picture (not your order): it shows where to find the Order ID."
+GUIDE_NOTE = "\U0001F4CC Example picture (not your order): send a screenshot of this page from your order."
 
 
 async def send_order_guide(cfg, customer, caption):
     caption = f"{GUIDE_NOTE}\n\n{caption}"  # so customers don't take the sample product for their own order
-    if len(caption) > 1024 or not ORDER_ID_GUIDE.is_file():
+    guide = ORDER_ID_GUIDE_MEESHO if chat_platform.get() == "Meesho" and ORDER_ID_GUIDE_MEESHO.is_file() else ORDER_ID_GUIDE
+    if len(caption) > 1024 or not guide.is_file():
         return False
     try:
-        data = ORDER_ID_GUIDE.read_bytes()
-        media_id = await wa_upload(cfg, data, "image/jpeg", ORDER_ID_GUIDE.name)
+        data = guide.read_bytes()
+        media_id = await wa_upload(cfg, data, "image/jpeg", guide.name)
         _cache_media(media_id, data, "image/jpeg")
         response = await send_payload(
             cfg, customer, {"messaging_product": "whatsapp", "to": customer, "type": "image",
                             "image": {"id": media_id, "caption": caption}},
             kind="image", text=caption, source="bot",
-            media={"media_id": media_id, "media_mime": "image/jpeg", "media_name": ORDER_ID_GUIDE.name},
+            media={"media_id": media_id, "media_mime": "image/jpeg", "media_name": guide.name},
         )
         if response.is_success:
             await db().execute("UPDATE wa_contacts SET guide_sent_at = now() WHERE number_label=$1 AND customer_phone=$2",
@@ -2719,7 +2877,10 @@ async def chat_language(label: str, customer: str, incoming: str) -> str:
 _reply_translations = OrderedDict()
 _updated_order_reply = "Thank you! Your details for order {order_id} have been updated."
 _english_reply_lines = set("\n".join([*(v for k, v in DEFAULT_SETTINGS["bot"].items() if k != "knowledge"), _updated_order_reply,
-                                       "Your order {order_id} is already saved.", "Updated your order {order_id}:"]).splitlines())
+                                       "Your order {order_id} is already saved.", "Updated your order {order_id}:",
+                                       PRODUCT_QUESTION, NO_CHARM_REPLY, OFF_CHART_REPLY]).splitlines())
+_english_reply_lines |= {t.replace("{platform}", p) for t in (DEFAULT_SETTINGS["bot"]["ask_order_id"], SCREENSHOT_AGAIN)
+                         for p in ("Meesho", "Flipkart", "Meesho or Flipkart")}
 _translation_preamble = re.compile(
     r"^(?:the (?:target|source) language\b|(?:here is|here's) (?:the|your) translat|"
     r"translation\s*:|translated (?:text|reply)\s*:)", re.I)
@@ -2776,12 +2937,15 @@ async def prompt_for_details(cfg, customer, fields, step, language="", answer=""
         await db().execute(UPSERT_CONV_SQL, cfg["logical_id"], customer, step, fields)
         return
     # the charm chart: with the charm question (products that take a charm), once per customer
-    if step_filled(fields, "order_id") and not step_filled(fields, "charm"):
+    if step_filled(fields, "order_id") and not step_filled(fields, "charm") and fields.get("_product"):
         chart_before = await db().fetchval(
             "SELECT charm_chart_sent_at IS NOT NULL FROM wa_contacts WHERE number_label=$1 AND customer_phone=$2", cfg["logical_id"], customer)
         if not chart_before and await send_charm_chart(cfg, customer, question):
             return
     await send_wa(cfg, customer, question)
+    if not fields.get("_shot_asked") and screenshot_again() in (missing_questions(fields) if FEWER_FOLLOWUPS else ""):
+        fields["_shot_asked"] = "yes"  # asked once; next time it asks which product
+        await db().execute(UPSERT_CONV_SQL, cfg["logical_id"], customer, step, fields)
 
 
 def fill_template(text: str, values: Dict[str, str]) -> str:
@@ -3051,6 +3215,8 @@ async def record_message(
 
 
 async def send_wa(cfg: Dict[str, Any], to: str, text: str, source: str = "bot") -> httpx.Response:
+    if source == "bot":
+        text = one_platform(text)
     body = {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, "type": "text", "text": {"body": text}}
     return await send_payload(cfg, to, body, kind="text", text=text, source=source)
 
@@ -3196,6 +3362,7 @@ async def ai_bot_turn(text: str, asked: Optional[str], fields: Dict[str, str],
         f"Recent conversation (oldest first):\n{convo}\n\n"
         f"Next unfilled intake field (recent messages show the actual last question): {STEP_ASKED.get(asked or '', 'none yet')}\n"
         f"Reply language: {language or 'infer from customer'}\n"
+        f"{platform_line()}"
         f"Shop facts (answer customer questions only from these; if a question isn't covered, say the team will confirm): "
         f"{((SETTINGS.get('bot') or {}).get('knowledge') or 'none given').strip()[:3000]}\n"
         f"Details collected so far: {json.dumps(known, ensure_ascii=False) if known else 'nothing'}\n"
@@ -3321,8 +3488,12 @@ async def bot_stays_out(phone: str) -> bool:
 
 async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     biz = cfg["logical_id"]
+    chat_platform.set(platform_of(biz))
     if await bot_stays_out(customer):
         return  # group or saved contact: never reply, never read
+    if await db().fetchval("SELECT bot_paused_at IS NOT NULL FROM wa_contacts WHERE number_label=$1 AND customer_phone=$2",
+                           biz, customer):
+        return  # Rule: staff paused the bot in this chat (screenshots were still read before this point)
     conv = await db().fetchrow(
         "SELECT step, fields FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2",
         biz,
@@ -3359,6 +3530,17 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
         return
     # Rule: "what is a charm / show options" gets the charm chart (any time, even if sent before)
     if CHARM_HELP_RE.search(cleaned) and not detect_ids(cleaned):
+        no_charm = (conv["fields"] or {}).get("_no_charm") if conv and (conv["fields"] or {}).get("_product") \
+            else (await chat_product(biz, customer)).get("_no_charm")
+        if not no_charm and not (conv and (conv["fields"] or {}).get("_product")):
+            last = await db().fetchrow("SELECT product_name, charm FROM orders WHERE channel=$1 AND customer_phone=$2 "
+                                       "ORDER BY created_at DESC LIMIT 1", biz, customer)
+            name = (conv["fields"] or {}).get("product_name") if conv else (last["product_name"] if last and not last["charm"] else "")
+            no_charm = bool(name and PRO_NAME_RE.match(name)) or any(
+                PRO_WORDS_RE.search(m["body"] or "") for m in history if m["direction"] == "in")
+        if no_charm:
+            await send_wa(cfg, customer, await localize_reply(NO_CHARM_REPLY, language))
+            return
         caption = await localize_reply("Please send the number of the charm you'd like.", language)
         if await send_charm_chart(cfg, customer, caption):
             return
@@ -3397,10 +3579,13 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     # the customer's own words: a screenshot note gives the order ID and product only, never the name or charm
     said = "\n".join(ln for ln in cleaned.splitlines() if not ln.startswith(SCREENSHOT_NOTE) and ln.strip() != "[photo]").strip()
     # Rule: an Order ID your staff typed in this chat counts (they read it from the customer's screenshot)
-    if not fields.get("order_id") and not ids:
+    partial = fields.get("order_id") and not FULL_ID_RE.fullmatch(fields["order_id"].replace(" ", ""))
+    if (not fields.get("order_id") or partial) and not ids:  # a partial ID (from older chats) is replaced too
         for m in reversed(history):
             staff_ids = [i for i in detect_ids(m["body"]) if FULL_ID_RE.fullmatch(i)] if m["direction"] == "out" \
                 and m.get("source") in ("staff", "phone_app") else []
+            if partial:
+                staff_ids = [i for i in staff_ids if norm_id(fields["order_id"]) in norm_id(i)]
             if staff_ids:  # only a complete ID (staff sometimes type part of it first)
                 fields["order_id"] = staff_ids[0]
                 break
@@ -3408,8 +3593,19 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     if not fields.get("_product"):
         for txt in [said] + [m["body"] for m in reversed(history) if m["direction"] == "in"]:
             if txt and len(txt) < 300 and not txt.startswith(SCREENSHOT_NOTE) and cat.items_in(txt):
-                apply_product(fields, txt)
+                apply_product(fields, txt, from_words=True)
                 break
+    # Rule: "I ordered only key chain" corrects the item list (the bot never keeps asking for an item they didn't buy)
+    said_items = cat.items_in(said) if said and len(said) < 300 else []
+    if said_items and fields.get("_items") and ONLY_ITEMS_RE.search(said):
+        kept = [i for i in fields["_items"].split(",") if i in said_items
+                or (i.endswith("keychain") and any(s.endswith("keychain") for s in said_items))]
+        if kept and len(kept) < len(fields["_items"].split(",")):
+            names = combo_names(fields)
+            apply_product(fields, said, from_words=True)
+            kept_name = next((names[i] for i in kept if names.get(i)), "")
+            if kept_name:
+                fields["product_name"] = kept_name  # the name they already gave for the item they did buy
     step = next_step(fields)
     # labelled details ("name AARAV", "charm no 5") and replies laid out like the shop's numbered list (no AI needed)
     labelled = {**pattern_details(said), **numbered_reply(said, shop_menu(history))} if said else {}
@@ -3503,6 +3699,7 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
         picked = [int(x) for x in re.findall(r"\b\d{1,2}\b", said) if x in fields["_charm_pick"].split(",")]
         if picked:  # "3" after "Which crown? 2, 3 or 4"
             fields["charm"] = str(picked[0])
+    professional_keychain(fields, [said] + [m["body"] for m in history if m["direction"] == "in"])
     apply_charm(fields)  # chart charm -> "52 (Om)"; "crown" -> ask 2, 3 or 4
     step = next_step(fields)
     if step >= len(STEP_KEYS) or (FEWER_FOLLOWUPS and STEP_KEYS[step] == "notes"):
@@ -3555,6 +3752,8 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
             "DELETE FROM wa_conversations WHERE business_number_id = $1 AND customer_phone = $2", biz, customer
         )
         template = bot_text("thank_you")
+        if fields.get("_no_charm") and not order.get("charm"):
+            template = re.sub(r"\n[^\n]*\{charm\}[^\n]*", "", template)  # no "Charm: -" line: it makes customers ask
         extra = []
         for field, title in (("colour", "Colour"), ("quantity", "Quantity")):
             if order.get(field):
@@ -3588,6 +3787,30 @@ FULL_ID_RE = re.compile(r"OD\d{15,21}|\d{15,20}(?:_\d{1,2})?", re.I)  # complete
 _NO_CHARM_WORDS = re.compile(r"^(?:n/?a|na|nil|none|no|not\s*applicable|not\s*required|not\s*needed|no\s*charm|without\s*charm|-+|nahi|nhi)$", re.I)
 
 
+# Doctor / advocate keychains carry their symbol already: they never take a charm.
+PRO_WORDS_RE = re.compile(
+    r"\b(?:doctor|dr|adv|advocate|lawyer|vakeel)\.?\s*(?:symbol|logo|sign|key\s*-?\s*chain|key\s*ring)"
+    r"|\bsymbol\s+of\s+(?:a\s+)?(?:doctor|advocate|lawyer)|वकील|डॉक्टर", re.I)
+PRO_NAME_RE = re.compile(r"^\s*(?:dr|doctor|adv|advocate)\b\.?", re.I)
+PRO_CHARM_RE = re.compile(r"^\s*(?:9|55)\b|doctor|advocate|lawyer|\badv\b|\bdr\b|symbol", re.I)
+
+
+def professional_keychain(fields: Dict[str, str], texts: List[str]) -> None:
+    """Product unknown and the customer says 'doctor symbol / Adv keychain', or the name starts with Dr./Adv.
+    (with no charm chosen): it's the doctor/advocate keychain, so no charm is asked or kept."""
+    if fields.get("_product"):
+        return
+    words = next((t for t in texts if t and len(t) < 300 and PRO_WORDS_RE.search(t)), "")
+    name = (fields.get("product_name") or "").strip()
+    if words or (PRO_NAME_RE.match(name) and not fields.get("charm")):
+        advocate = re.search(r"adv|lawyer|vakeel|वकील", words or name, re.I)
+        apply_product(fields, "Advocate keychain" if advocate else "Doctor keychain", from_words=True)
+        if fields.get("charm") and PRO_CHARM_RE.search(fields["charm"]):
+            fields.pop("charm")  # "doctor symbol" is the keychain itself, not charm 9
+            fields.pop("_charm_ok", None)
+        fields.pop("_charm_pick", None)
+
+
 def not_a_charm(value: str) -> bool:
     """'N/A', 'Not applicable', 'Keychain', 'Doctor keychain', 'kada': not a charm choice."""
     v = re.sub(r"[.!]+$", "", (value or "").strip())
@@ -3613,12 +3836,20 @@ async def follow_up(cfg: Dict[str, Any], customer: str, order: asyncpg.Record, t
     current = {k: str(order[k] or "") for k in _FIELD_TITLES}
     understood: Dict[str, str] = {}
     action, answer = "", ""
+    product = await chat_product(order["channel"], customer)
+    if not product.get("_product") and not current["charm"]:  # "Dr. Priya" / "Adv. Sonu": doctor/advocate keychain
+        guess = {"product_name": current["product_name"]}
+        professional_keychain(guess, [said] + [m["body"] for m in history if m["direction"] == "in"])
+        if guess.get("_product"):
+            product = {k: v for k, v in guess.items() if k.startswith("_")}
     if ai_ready():
         context = (f"This customer's order {order['order_id']} is ALREADY SAVED with the details collected so far. Read their "
                    "message as a change, an extra instruction, a question or chat. Never ask for the Order ID and never restart "
                    "the order. An extra instruction ('make it beautiful', 'other side: X', 'print on keychain') is notes. A request "
                    "to add a title/prefix to the name returns the full new product_name. Words naming the product type "
                    "('CA keychain', 'doctor keychain') are not a charm. 'Thank you', 'ok' and emojis: action silent.")
+        if product:
+            context += " " + product_context(product)
         turn = await ai_bot_turn(text, None, {"order_id": order["order_id"], **current}, history, language, context)
         if turn:
             understood, action, answer = turn
@@ -3644,6 +3875,15 @@ async def follow_up(cfg: Dict[str, Any], customer: str, order: asyncpg.Record, t
             if not await send_charm_chart(cfg, customer, reply):
                 await send_wa(cfg, customer, reply)
             return
+    if understood.get("charm") and product.get("_no_charm") and "logo" not in understood["charm"].lower():
+        understood.pop("charm")  # Rule: this product takes no charm (a number they send is never saved as one)
+        if not changes and not (understood.get("product_name") or understood.get("notes")):
+            await send_wa(cfg, customer, await localize_reply(NO_CHARM_REPLY, language))
+            return
+    if understood.get("charm") and off_chart(understood["charm"]):
+        understood.pop("charm")
+        await send_wa(cfg, customer, await localize_reply(OFF_CHART_REPLY, language))
+        return
     if understood.get("charm"):
         picked, options = charms.resolve(understood["charm"])
         if picked:
@@ -4439,6 +4679,13 @@ async def inbox_conversations(
             args.append(f"%{wanted}%")
             cond += (f" OR EXISTS (SELECT 1 FROM orders o WHERE o.customer_phone = c.customer_phone AND c.customer_phone <> ''"
                      f" AND regexp_replace(upper(o.order_id), '[^A-Z0-9]', '', 'g') LIKE ${len(args)})")
+        if id_prefix(query):  # Rule: the first 8 digits of an order ID find it in orders and in the chat's messages
+            args.append(id_prefix(query) + "%")
+            cond += (f" OR EXISTS (SELECT 1 FROM orders o WHERE o.customer_phone = c.customer_phone AND c.customer_phone <> ''"
+                     f" AND regexp_replace(o.order_id, '[^0-9]', '', 'g') LIKE ${len(args)})")
+            args.append(id_text_regex(id_prefix(query)))
+            cond += (f" OR EXISTS (SELECT 1 FROM wa_messages m WHERE m.number_label = c.number_label"
+                     f" AND m.customer_phone = c.customer_phone AND (m.body ~ ${len(args)} OR m.ai_note ~ ${len(args)}))")
         conds.append(cond + ")")
     args.append(current_user.get())
     me = len(args)
@@ -4552,7 +4799,8 @@ async def customer_data(phone: str = "", order_id: str = "", missing: str = "", 
                ARRAY(SELECT field FROM unnest(ARRAY['order_id','product_name','charm']) field
                         WHERE coalesce(trim(details->>field),'')='') AS missing_fields
         FROM records WHERE strpos(phone,$1)>0
-          AND strpos(regexp_replace(upper(coalesce(details->>'order_id','')),'[^A-Z0-9]','','g'),$2)>0
+          AND (strpos(regexp_replace(upper(coalesce(details->>'order_id','')),'[^A-Z0-9]','','g'),$2)>0
+               OR ($8<>'' AND regexp_replace(coalesce(details->>'order_id',''),'[^0-9]','','g') LIKE $8 || '%'))
           AND ($3='' OR ($3='any' AND (coalesce(details->>'order_id','')='' OR
                coalesce(details->>'product_name','')='' OR coalesce(details->>'charm','')=''))
                OR ($3 IN ('order_id','product_name','charm','colour','quantity','notes') AND coalesce(details->>$3,'')=''))
@@ -4560,7 +4808,7 @@ async def customer_data(phone: str = "", order_id: str = "", missing: str = "", 
           AND NOT EXISTS (SELECT 1 FROM unnest($7::text[]) AS h(field)
                           WHERE nullif(trim(details->>h.field),'') IS NULL)
         ORDER BY at DESC,label,phone,key LIMIT 51 OFFSET $6
-    """, re.sub(r"\D", "", phone), norm_id(order_id), missing, since, until, offset, required)
+    """, re.sub(r"\D", "", phone), norm_id(order_id), missing, since, until, offset, required, id_prefix(order_id))
     total = int(rows[0]["total_rows"]) if rows else 0
     if not rows and offset:  # past the last page: still report how many there are
         total = None
@@ -4729,6 +4977,29 @@ async def inbox_chat_state(label: str, phone: str, payload: ChatStateIn):
     if not row:
         raise HTTPException(404, "No chat with this customer on that number.")
     return conversation_public(row)
+
+
+class BotPauseIn(BaseModel):
+    paused: bool
+
+
+@api.post("/inbox/conversations/{label}/{phone}/bot-pause")
+async def inbox_bot_pause(label: str, phone: str, payload: BotPauseIn):
+    """Pause the bot in one chat while staff handle it (until someone resumes it). Screenshots are still read."""
+    if payload.paused:
+        row = await db().fetchrow(
+            "UPDATE wa_contacts c SET bot_paused_at = now(), bot_paused_by = $3, bot_due_at = NULL, bot_since = NULL "
+            "WHERE number_label = $1 AND customer_phone = $2 RETURNING c.*, false AS saved_contact, 0 AS order_count",
+            label, phone, current_user.get())
+    else:
+        row = await db().fetchrow(
+            "UPDATE wa_contacts c SET bot_paused_at = NULL, bot_paused_by = '' "
+            "WHERE number_label = $1 AND customer_phone = $2 RETURNING c.*, false AS saved_contact, 0 AS order_count",
+            label, phone)
+    if not row:
+        raise HTTPException(404, "No chat with this customer on that number.")
+    return {"bot_paused_at": row["bot_paused_at"].isoformat() if row["bot_paused_at"] else None,
+            "bot_paused_by": row["bot_paused_by"]}
 
 
 @api.post("/inbox/conversations/{label}/{phone}/clear")

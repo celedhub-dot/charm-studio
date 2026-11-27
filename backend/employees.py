@@ -21,7 +21,7 @@ PERMISSIONS = {
 ENDPOINTS = {
     "customer_data": ("customers",), "inbox_conversations": ("chats",),
     "inbox_unread": ("chats",), "inbox_thread": ("chats",), "inbox_media": ("chats",),
-    "inbox_send": ("chats", "text"), "inbox_send_media": ("chats", "media"),
+    "inbox_send": ("chats", "text"), "inbox_bot_pause": ("chats", "text"), "inbox_send_media": ("chats", "media"),
     "inbox_templates": ("templates",), "inbox_send_template": ("chats", "templates"),
     "list_orders": ("orders",), "create_order": ("create",), "bulk_orders": ("create",),
     "update_order": ("edit",), "export_orders_csv": ("exports", "orders"),

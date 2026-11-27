@@ -69,14 +69,20 @@ async def fake_ocr(data):
 
 
 current_phone = [""]
+said_by = {}  # phone -> texts it sent, so the fake AI answers the right chat even when replies run late
 
 
 async def fake_claude(system, user, max_tokens=16000, effort=None, model=None):
     if system == server.BOT_TURN_SYSTEM:
         prompts.append(user)
-        for phone, queue in BOT_TURNS.items():
-            if queue and phone == current_phone[0]:
-                return json.dumps(queue.pop(0))
+        new = user.split("NEW customer message(s) to read", 1)[-1]
+        # the chat whose own (longest) message is in this prompt; short common words ("Hi", "Thank you") prefer the latest chat
+        score = {p: max((len(t) for t in texts if len(t) > 9 and t in new), default=0) for p, texts in said_by.items()}
+        best = max(score.values(), default=0)
+        owner = current_phone[0] if not best or score.get(current_phone[0]) == best else max(score, key=score.get)
+        queue = BOT_TURNS.get(owner)
+        if queue:
+            return json.dumps(queue.pop(0))
         return json.dumps({"action": "silent"})
     if system == server.SCREENSHOT_SYSTEM:
         return json.dumps({"order_page": False})
@@ -141,6 +147,8 @@ try:
 
         def msg(mid, frm, body=None, image=None):
             current_phone[0] = frm
+            if body:
+                said_by.setdefault(frm, []).append(body.splitlines()[0][:60])
             m = {"id": mid, "from": frm, "timestamp": str(int(time.time()))}
             if image:
                 m.update({"type": "image", "image": {"id": image, "mime_type": "image/jpeg"}})
@@ -152,7 +160,7 @@ try:
         def replies(phone):
             return [t for p, t in sent if p == phone]
 
-        def wait_n(phone, n, timeout=20):
+        def wait_n(phone, n, timeout=60):
             end = time.time() + timeout
             while time.time() < end and len(replies(phone)) < n:
                 time.sleep(0.3)
@@ -203,7 +211,9 @@ try:
         msg("g2", G, "I ordered customized name in CA keychain")
         msg("g3", G, "NAME: CA GNANESHWARAN")
         r = wait_n(G, 1)
-        check("Order ID" in r[-1] and "charm" not in r[-1].lower(), "asks only for the Order ID (keychain from their words: no charm)", r[-1])
+        check(r and "Order ID" in r[-1] and "charm" not in r[-1].lower(), "asks only for the Order ID (keychain from their words: no charm)",
+              (r[-1:], c.portal.call(server.db().fetchrow, "SELECT bot_due_at, bot_since, bot_paused_at, now() FROM wa_contacts WHERE customer_phone=$1", G),
+               c.portal.call(server.db().fetch, "SELECT customer_phone, bot_due_at FROM wa_contacts WHERE bot_due_at IS NOT NULL")))
         asyncio.run(asyncio.sleep(0))
         c.portal.call(server.record_message, "Shop M", G, "out", "text", "357200000000009488", None, "sent", "staff")  # staff typed the ID
         BOT_TURNS[G] = [{"notes": "Other side: OPPORTUNITY COST", "action": "collect"}]
@@ -291,6 +301,137 @@ try:
         msg("o3", O, "46")
         r = wait_n(O, 3)
         check(orders(O)[0]["charm"] == "46 (Red heart)" and "Charm: 46 (Red heart)" in r[-1], "a new number updates the charm", (orders(O), r[-1:]))
+
+        time.sleep(4)
+        print("Keychain only: a combo listing never adds a wallet")
+        server.CATALOGUE.append({"title": "Wallet Key Chain Combo STEP 1:-Place Your Order On Meesho", "sku": "WKC-TEST"})
+        needs, name = server.product_needs("On keychain", from_words=True)
+        check(needs["items"] == [] and "Wallet" not in name, "'On keychain' (their words) is not matched to the wallet combo", (needs, name))
+        K = "919000000308"
+        BOT_TURNS[K] = [{"order_id": "OD100000000000000001", "action": "collect"},
+                        {"product_name": "Dr. Test", "action": "collect"}, {"action": "collect"}]
+        msg("k1", K, "OD100000000000000001 my order ID from Flipkart")
+        wait_n(K, 1)
+        msg("k2", K, "Name - Dr. Test")
+        wait_n(K, 2)
+        msg("k3", K, "On keychain")
+        r = wait_n(K, 3)
+        time.sleep(3)
+        check(not [x for x in replies(K) if "Wallet" in x], "never asks for a wallet name", replies(K))
+        V = "919000000309"
+        BOT_TURNS[V] = [{"order_id": "OD100000000000000002", "action": "collect"},
+                        {"product_name": "Keychain: Dr. Test", "action": "collect"}, {"action": "collect"}]
+        msg("v1", V, "OD100000000000000002 wallet keychain combo")
+        wait_n(V, 1)
+        msg("v2", V, "Keychain - Dr. Test")
+        r = wait_n(V, 2)
+        check("Wallet" in r[-1], "a real combo: asks for the wallet name", r[-1:])
+        msg("v3", V, "I ordered only key chain")
+        r = wait_n(V, 3)
+        time.sleep(3)
+        o = orders(V)
+        check("Wallet" not in replies(V)[-1] and o and o[0]["product_name"] == "Dr. Test",
+              "'I ordered only key chain' drops the wallet and keeps the keychain name", (o, replies(V)[-1:]))
+        server.CATALOGUE.pop()
+
+        time.sleep(4)
+        print("A keychain without a charm: no 'Charm:' line, no charm saved later")
+        N = "919000000310"
+        BOT_TURNS[N] = [{"order_id": "357900000000000111", "product_name": "Test Saheb", "action": "collect"}]
+        msg("n1", N, "357900000000000111 CA name keychain, Name: Test Saheb")
+        r = wait_n(N, 1)
+        check("saved" in r[-1].lower() and "Charm" not in r[-1], "saved summary has no 'Charm:' line for a no-charm product", r[-1:])
+        msg("n2", N, "Charm means")
+        r = wait_n(N, 2)
+        check(r[-1] == server.NO_CHARM_REPLY, "'Charm means' on a no-charm product: says it takes no charm", r[-1:])
+        BOT_TURNS[N] = [{"charm": "2721", "action": "collect"}]
+        msg("n3", N, "2721")
+        r = wait_n(N, 3)
+        check(not orders(N)[0]["charm"] and r[-1] == server.NO_CHARM_REPLY, "a number sent later is not saved as a charm", (orders(N), r[-1:]))
+        Y = "919000000312"
+        BOT_TURNS[Y] = [{"order_id": "357900000000000333", "product_name": "Arun", "action": "collect"}, {"action": "collect"}]
+        msg("y1", Y, "357900000000000333 Name-Arun")
+        r = wait_n(Y, 1)
+        check("screenshot of this order" in r[-1] and "charm" not in r[-1].lower() and not r[-1].startswith("[charm chart]"),
+              "product unknown: asks for the order screenshot before any charm (no chart)", r[-1:])
+        msg("y2", Y, "Kada")
+        r = wait_n(Y, 2)
+        o = orders(Y)
+        check(o and not o[0]["charm"] and "saved" in r[-1].lower(), "'Kada': saved with no charm", (o, r[-1:]))
+        print("Doctor / advocate keychains: never a charm")
+        D = "919000000313"
+        BOT_TURNS[D] = [{"order_id": "357900000000000444", "product_name": "Dr. Testname", "action": "collect"}]
+        msg("d1", D, "357900000000000444\nDr. Testname")
+        r = wait_n(D, 1)
+        check("saved" in r[-1].lower() and "Charm" not in r[-1] and "charm" not in r[-1].lower(),
+              "name 'Dr. Testname' (product unknown): saved, no charm question", r[-1:])
+        msg("d2", D, "What charm and notes means")
+        r = wait_n(D, 2)
+        check(r[-1] == server.NO_CHARM_REPLY, "asking what charm means: told it takes no charm (no chart)", r[-1:])
+        E = "919000000314"
+        BOT_TURNS[E] = [{"order_id": "357900000000000555", "product_name": "Priya", "charm": "Doctor symbol", "action": "collect"}]
+        msg("e1", E, "357900000000000555 Doctor symbol with name Priya")
+        r = wait_n(E, 1)
+        o = orders(E)
+        check(o and not o[0]["charm"] and "saved" in r[-1].lower(), "'Doctor symbol with name': no charm saved", (o, r[-1:]))
+        F = "919000000315"
+        BOT_TURNS[F] = [{"order_id": "357900000000000666", "action": "collect"}, {"product_name": "Adv. Demoname", "action": "collect"}]
+        msg("f1", F, "357900000000000666")
+        wait_n(F, 1)
+        msg("f2", F, "Adv. Demoname")
+        r = wait_n(F, 2)
+        check("saved" in r[-1].lower() and "charm" not in r[-1].lower() and orders(F) and not orders(F)[0]["charm"],
+              "'Adv. Demoname' after the ID: saved, no charm", (orders(F), r[-1:]))
+        G2 = "919000000316"
+        BOT_TURNS[G2] = [{"order_id": "357900000000000777", "product_name": "Dr. Mehta", "charm": "46", "action": "collect"}]
+        msg("g21", G2, "357900000000000777 wallet, name Dr. Mehta, charm 46")
+        wait_n(G2, 1)
+        check(orders(G2) and orders(G2)[0]["charm"] == "46 (Red heart)", "a Dr. ordering a wallet with a charm keeps the charm", orders(G2))
+        print("One platform per number; the screenshot first")
+        check(server.platform_of("Meestuffs Meesho") == "Meesho" and server.platform_of("Meestuffs Flipkart") == "Flipkart"
+              and server.platform_of("Order desk") == "", "the number's name tells the platform")
+        tok_p = server.chat_platform.set("Meesho")
+        check("Meesho order details page" in server.bot_question(0) and "Flipkart" not in server.bot_question(0),
+              "Meesho number: asks for the Meesho order screenshot only", server.bot_question(0))
+        check(server.one_platform("Find it in your Meesho or Flipkart app") == "Find it in your Meesho app", "Meesho number: never says 'or Flipkart'")
+        server.chat_platform.set("Flipkart")
+        check("Flipkart order details page" in server.bot_question(0) and server.one_platform("on Meesho/Flipkart") == "on Flipkart",
+              "Flipkart number: Flipkart only")
+        server.chat_platform.reset(tok_p)
+        check("Meesho or Flipkart" in server.bot_question(0), "other numbers mention both")
+        Q = "919000000317"
+        BOT_TURNS[Q] = [{"order_id": "357900000000000888", "action": "collect"}, {"action": "collect"}]
+        msg("q1", Q, "357900000000000888")
+        r = wait_n(Q, 1)
+        check("screenshot of this order" in r[-1], "typed ID, product unknown: asks once more for the screenshot", r[-1:])
+        msg("q2", Q, "I don't have it")
+        r = wait_n(Q, 2)
+        check(server.PRODUCT_QUESTION in r[-1] and "screenshot" not in r[-1], "then asks which product (screenshot asked only once)", r[-1:])
+        print("Bot pause in one chat")
+        Z = "919000000318"
+        BOT_TURNS[Z] = [{"action": "collect"}]
+        msg("z1", Z, "Hi")
+        wait_n(Z, 1)
+        r = c.post(f"/api/inbox/conversations/Shop%20M/{Z}/bot-pause", headers=H(tok), json={"paused": True})
+        check(r.status_code == 200 and r.json()["bot_paused_at"], "staff pause the bot in a chat", r.text[:200])
+        n = len(replies(Z))
+        BOT_TURNS[Z] = [{"order_id": "357900000000000999", "action": "collect"}]
+        msg("z2", Z, "357900000000000999")
+        check(len(settle(Z, 6)) == n, "paused: the bot sends nothing")
+        r = c.post(f"/api/inbox/conversations/Shop%20M/{Z}/bot-pause", headers=H(tok), json={"paused": False})
+        check(r.status_code == 200 and r.json()["bot_paused_at"] is None, "resumed")
+        BOT_TURNS[Z] = [{"product_name": "Ravi", "action": "collect"}]
+        msg("z3", Z, "Name Ravi")
+        r = wait_n(Z, n + 1)
+        check(len(r) > n, "after resuming, the bot replies again", r[-1:])
+        X = "919000000311"
+        BOT_TURNS[X] = [{"order_id": "357900000000000222", "product_name": "Riya", "charm": "46", "action": "collect"}]
+        msg("x1", X, "357900000000000222 wallet name Riya charm 46")
+        wait_n(X, 1)
+        BOT_TURNS[X] = [{"charm": "2721", "action": "collect"}]
+        msg("x2", X, "change charm to 2721")
+        r = wait_n(X, 2)
+        check(orders(X) and orders(X)[0]["charm"] == "46 (Red heart)" and r[-1:] == [server.OFF_CHART_REPLY], "a number not on the chart (2721) is refused", (orders(X), r[-1:]))
 
         time.sleep(4)
         print("Shop facts reach the AI")
