@@ -15,7 +15,9 @@ export const NAV = [
   { to: "/labels", label: "Label Studio", icon: Tag, id: "labels" },
   { to: "/bot", label: "WhatsApp Bot", icon: Robot, id: "bot" },
 ];
-const SETTINGS_NAV = { to: "/settings", label: "Settings", icon: GearSix, id: "settings" };
+// Pages with wide tables use the whole screen width (no horizontal scrolling)
+const WIDE_PAGES = ["/orders", "/customer-data"];
+const SETTINGS_NAV ={ to: "/settings", label: "Settings", icon: GearSix, id: "settings" };
 const pagePermissions = { "/": "dashboard", "/chats": "chats", "/customer-data": "customers",
   "/orders": "orders", "/extract": "extract", "/labels": "labels" };
 function allowed(me, path) {
@@ -211,7 +213,10 @@ export default function Layout() {
       )}
 
       <main className="lg:pl-64">
-        <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
+        <div className={cn(
+          "mx-auto px-4 py-6 sm:px-6 lg:py-10",
+          WIDE_PAGES.some((p) => location.pathname.startsWith(p)) ? "max-w-none lg:px-6" : "max-w-6xl lg:px-10"
+        )}>
           {allowed(me, location.pathname) ? <Outlet /> : firstAllowed ? <Navigate to={firstAllowed.to} replace /> :
             <p>Your owner has disabled access to all sections.</p>}
         </div>

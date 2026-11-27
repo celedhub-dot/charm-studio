@@ -475,7 +475,7 @@ export default function Orders() {
               <THead>
                 <tr>
                   <TH className="pl-5">Order ID</TH>
-                  <TH>Name on product</TH>
+                  <TH>Name</TH>
                   <TH>Colour</TH>
                   <TH>Charm</TH>
                   <TH>Qty</TH>
@@ -524,7 +524,7 @@ export default function Orders() {
                     </TR>
                   ) : (
                     <TR key={o.id} data-testid={`order-row-${o.id}`}>
-                      <TD className="pl-5 font-mono text-[13px]">
+                      <TD className="whitespace-nowrap pl-5 font-mono text-xs">
                         <span className="inline-flex items-center gap-1">
                           {o.order_id || "—"}
                           {o.confirmed_at && (
@@ -532,11 +532,11 @@ export default function Orders() {
                           )}
                         </span>
                       </TD>
-                      <TD>{o.product_name || <span className="text-muted">—</span>}</TD>
-                      <TD>{o.colour || <span className="text-muted">—</span>}</TD>
-                      <TD>{o.charm || <span className="text-muted">—</span>}</TD>
+                      <TD className="max-w-[200px]" title={o.product_name}><span className="line-clamp-3">{o.product_name || <span className="text-muted">—</span>}</span></TD>
+                      <TD className="max-w-[90px]">{o.colour || <span className="text-muted">—</span>}</TD>
+                      <TD className="max-w-[130px]">{o.charm || <span className="text-muted">—</span>}</TD>
                       <TD className="tabular-nums">{o.quantity || <span className="text-muted">—</span>}</TD>
-                      <TD className="max-w-[220px] truncate" title={o.notes}>
+                      <TD className="max-w-[240px] truncate text-xs" title={o.notes}>
                         {o.notes || <span className="text-muted">—</span>}
                       </TD>
                       <TD className="whitespace-nowrap">

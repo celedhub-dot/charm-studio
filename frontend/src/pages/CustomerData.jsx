@@ -4,7 +4,16 @@ import { api, errorMessage } from "../lib/api";
 import { PageHeader } from "../components/common";
 
 const fields = { order_id: "Order ID", product_name: "Engraving name", charm: "Charm", colour: "Colour", quantity: "Quantity", notes: "Notes" };
-const initial = { phone: "", order_id: "", missing: "", having: [], since: "", until: "" };
+const SHORT = { Quantity: "Qty", "Engraving name": "Name" };
+const CELL = {  // compact columns so the table fits without scrolling sideways
+  order_id: "whitespace-nowrap px-2.5 py-2 font-mono text-xs",
+  product_name: "max-w-[180px] px-2.5 py-2",
+  charm: "max-w-[130px] px-2.5 py-2",
+  colour: "max-w-[90px] px-2.5 py-2",
+  quantity: "px-2.5 py-2 tabular-nums",
+  notes: "max-w-[240px] px-2.5 py-2 text-xs",
+};
+const initial ={ phone: "", order_id: "", missing: "", having: [], since: "", until: "" };
 
 export default function CustomerData() {
   const [filters, setFilters] = useState(initial);
@@ -62,14 +71,25 @@ export default function CustomerData() {
     </div>
     {error ? <p role="alert">{error}</p> : !result ? <p>Loading customer data…</p> : <>
       <div className="overflow-x-auto rounded-xl border border-line bg-white">
-        <table className="w-full text-left text-sm"><thead><tr>
-          {["Customer","Date and time",...Object.values(fields),"Missing required details","Follow-up"].map(h => <th className="p-3" key={h}>{h}</th>)}
-        </tr></thead><tbody>{result.rows.map(r => <tr className="border-t border-line" key={JSON.stringify([r.label,r.phone,r.key])}>
-          <td className="p-3">{r.name}<div>{r.phone}</div><small>{r.label}</small></td>
-          <td className="p-3">{new Date(r.at).toLocaleString()}</td>
-          {Object.keys(fields).map(k => <td key={k} className="p-3">{r.details[k] || "—"}</td>)}
-          <td className="p-3">{r.missing_fields.map(k => fields[k]).join(", ") || "Complete"}</td>
-          <td className="p-3">{r.has_chat ? <Link className="text-forest underline" to={"/chats?" + new URLSearchParams({phone:r.phone,number:r.label})}>Message customer</Link> : "No linked chat"}</td>
+        <table className="w-full table-auto text-left text-[13px]"><thead className="bg-cream/60"><tr>
+          {["Customer","Date",...Object.values(fields).map(h => SHORT[h] || h),"Missing","Follow-up"].map(h =>
+            <th className="px-2.5 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted" key={h}>{h}</th>)}
+        </tr></thead><tbody>{result.rows.map(r => <tr className="border-t border-line align-top" key={JSON.stringify([r.label,r.phone,r.key])}>
+          <td className="max-w-[170px] px-2.5 py-2">
+            <div className="truncate font-medium" title={r.name}>{r.name || "—"}</div>
+            <div className="font-mono text-xs text-muted">{r.phone}</div>
+            <div className="truncate text-[11px] text-muted" title={r.label}>{r.label}</div>
+          </td>
+          <td className="whitespace-nowrap px-2.5 py-2 text-xs">
+            {new Date(r.at).toLocaleDateString()}<div className="text-muted">{new Date(r.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>
+          </td>
+          {Object.keys(fields).map(k => <td key={k} className={CELL[k] || "px-2.5 py-2"} title={r.details[k] || ""}>
+            <span className={k === "notes" || k === "product_name" ? "line-clamp-3" : ""}>{r.details[k] || "—"}</span>
+          </td>)}
+          <td className="max-w-[130px] px-2.5 py-2 text-xs">
+            {r.missing_fields.length ? <span className="text-terracotta-700">{r.missing_fields.map(k => fields[k]).join(", ")}</span> : <span className="text-forest">Complete</span>}
+          </td>
+          <td className="whitespace-nowrap px-2.5 py-2">{r.has_chat ? <Link className="text-forest underline" to={"/chats?" + new URLSearchParams({phone:r.phone,number:r.label})}>Open chat</Link> : <span className="text-xs text-muted">No chat</span>}</td>
         </tr>)}</tbody></table>
         {!result.rows.length && <p className="p-4">No matching customers.</p>}
       </div>
