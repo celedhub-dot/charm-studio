@@ -164,12 +164,27 @@ def best_match(title: str, products: Iterable[Dict[str, str]]) -> Optional[Dict[
     want = _tokens(title)
     if len(want) < 2:
         return None
+    # A screenshot shows the start of the real title, cut off ("Customised Glitered Pen with Na..."): a listing that
+    # begins with the same words wins over one that only shares words ("...wallet & Glitered Pen..." is a combo).
+    words = re.findall(r"[a-z0-9]+", (title or "").lower().replace("...", " ").replace("…", " "))
+    if len(words) > 2 and not (title or "").rstrip().endswith((".", "…")):
+        start = " ".join(words)
+    else:
+        start = " ".join(words[:-1])  # the last word may be cut ("Na")
+    want_items = set(items_in(title))
     best, score = None, 0.0
     for p in products:
         have = _tokens(p["title"])
         if not have:
             continue
         s = len(want & have) / len(want)
+        if s < 0.6:
+            continue
+        flat = " ".join(re.findall(r"[a-z0-9]+", p["title"].lower()))
+        if len(start) >= 8 and flat.startswith(start):
+            s += 1.0
+        if want_items and set(items_in(p["title"])) - want_items:
+            s -= 0.25  # the listing adds items the screenshot doesn't show
         if s > score:
             best, score = p, s
     return best if score >= 0.6 else None

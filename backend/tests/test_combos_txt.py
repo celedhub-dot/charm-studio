@@ -67,6 +67,15 @@ try:
     check(C("357444445555666677_1") == "357444445555666677_1", "Meesho _1 kept")
     check(C("wa-1a2b3c4d") == "wa-1a2b3c4d", "placeholder IDs untouched")
 
+    print("Catalogue match for a cut-off screenshot title")
+    import catalogue as cat
+    listings = [{"title": "Latest Gift Pack of Customised wallet & Glitered Pen for Men Green", "sku": "A"},
+                {"title": "Newly Customised Combo Pack of Wallet, Metal Keychain & Glitered Pen Tan", "sku": "B"},
+                {"title": "Customised Glitered Pen with Name| Metal Pen with Name Engraved| Best gift pen", "sku": "C"}]
+    check(cat.best_match("Customised Glitered Pen with Na...", listings)["sku"] == "C", "a pen screenshot matches the pen, not a wallet + pen pack")
+    check(cat.best_match("Latest Gift Pack of Customised wallet & Glite...", listings)["sku"] == "A", "a wallet + pen pack still matches the pack")
+    check(cat.best_match("Newly Customised Combo Pack of Wallet, Metal K...", listings)["sku"] == "B", "a 3-item combo still matches the combo")
+
     print("Combos: one name for all, or a name per item")
     items = "wallet,passport cover,metal keychain"
     check(server.combo_names({"_items": items, "product_name": "Aarav"}) ==
