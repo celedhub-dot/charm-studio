@@ -115,11 +115,15 @@ try:
         "Wallet passport cover keychain bottle combo", 1, "")
     blocks += engraving.txt_blocks_for_page([{"product_name": "Dr. Test", "quantity": "2"}], "Special Customised Doctor keychain with name", 1, "")
     blocks += engraving.txt_blocks_for_page([{"product_name": "Adv. Demo"}], "Trendy Customised name keychain for advocate | Metal Keychain", 1, "")
+    blocks += engraving.txt_blocks_for_page([{"product_name": "Vinay"}], "Customised Stylist Kada/Braclet for Men Silver", 1, "")
+    blocks += engraving.txt_blocks_for_page([{"product_name": "Neha"}], "Customised Name Bracelet for Women", 1, "")
     blocks += engraving.txt_blocks_for_page([], "", 1, "357000000000000001")
     txt = engraving.build_txt(blocks).replace("\r\n", "\n")
     check(txt.startswith("LEATHER (STRAP) (2)\nAarav\nRiya\nHappy journey\n"), "leather names first, caption under its name", txt[:80])
     check("METAL KEYCHAIN (1)\nDev" in txt and "BOTTLE (1)\nIra" in txt, "metal items under their own headings")
     check("DOCTOR KEYCHAIN (2)\nDr. Test\nDr. Test" in txt and "ADVOCATE KEYCHAIN (1)\nAdv. Demo" in txt, "doctor/advocate keychains, repeated for quantity")
+    check("KADA (1)\nVinay" in txt and "BRACELET (1)\nNeha" in txt and txt.index("BRACELET") < txt.index("KADA"),
+          "kada listed in its own section, apart from bracelets")
     check(txt.index("LEATHER") < txt.index("METAL KEYCHAIN") < txt.index("DOCTOR") < txt.index("BOTTLE") < txt.index("NAME MISSING"),
           "headings in the agreed order")
 

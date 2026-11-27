@@ -180,6 +180,7 @@ TXT_SECTIONS = [
     ("pen", "PEN"),
     ("bottle", "BOTTLE"),
     ("bracelet", "BRACELET"),
+    ("kada", "KADA"),
     ("chain", "NECK CHAIN"),
     ("rakhi", "RAKHI"),
     ("unknown", "OTHER / NOT CLEAR"),
@@ -208,6 +209,8 @@ def txt_section(item: str, title: str) -> str:
         return "leather"
     if item in ("metal keychain", "keychain"):
         return metal_kind(title)
+    if item == "bracelet" and re.search(r"\bkada\b|\bkadaa\b|\bkara\b", (title or "").lower()):
+        return "kada"  # a kada is engraved separately from bracelets
     return TXT_ITEM.get(item, "")
 
 
@@ -235,7 +238,7 @@ def txt_blocks_for_page(orders: List[Dict[str, Any]], title: str, qty: int, dete
             continue  # belt / card holder: nothing to engrave
         caption = [ln.strip() for ln in (o.get("caption") or "").splitlines() if ln.strip()]
         for sec in sections:
-            line = name if sec in ("leather", "pen", "bottle", "bracelet", "chain", "rakhi", "unknown") else sides(o)
+            line = name if sec in ("leather", "pen", "bottle", "bracelet", "kada", "chain", "rakhi", "unknown") else sides(o)
             lines = [line] + (caption if sec == "leather" and caption else [])
             for _ in range(n):
                 out.append((sec, lines + ([""] if len(lines) > 1 else [])))
