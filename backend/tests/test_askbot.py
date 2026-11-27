@@ -126,7 +126,7 @@ for msg, want in cases.items():
 s, f, done = asyncio.run(run(["Hi", "Hi, my order is 123456789012_1, name AARAV, heart charm", "none"]))
 print("one message + 'none' ->", done and done[0], "| bot asked:", s[1])
 assert "notes" in s[1].lower() or "note" in s[1].lower(), s
-assert done and done[0]["order_id"] == "123456789012_1" and done[0]["product_name"] == "AARAV" and done[0]["charm"] == "heart"
+assert done and done[0]["order_id"] == "123456789012_1" and done[0]["product_name"] == "AARAV" and done[0]["charm"] == "46 (Red heart)"
 s, f, done = asyncio.run(run(["Hi", "order 123456789012_1 name Meera, star charm, notes: gift wrap"]))
 assert done and done[0]["notes"] == "gift wrap" and done[0]["charm"] == "star", (s, done)
 print("everything in one message -> saved straight away:", s[-1].splitlines()[0])
@@ -164,12 +164,12 @@ replies[:] = [
 s, f, done = asyncio.run(run(["Hi", "mera order 123456789012_1 hai", "for my son Kabir, make it a heart one", "actually make the name Riya", "nothing else, thanks"]))
 check_ctx = prompts[1]
 assert "actual last question): What name should we print" in check_ctx and '"order_id": "123456789012_1"' in check_ctx, check_ctx
-assert done and done[0]["product_name"] == "Riya" and done[0]["charm"] == "Heart" and done[0]["notes"] == "", done
+assert done and done[0]["product_name"] == "Riya" and done[0]["charm"] == "46 (Red heart)" and done[0]["notes"] == "", done
 print("  context sent to the AI, correction applied ->", done[0]["product_name"], done[0]["charm"])
 prompts.clear()
 replies[:] = [RuntimeError("AI down")]
 s, f, _ = asyncio.run(run(["Hi", "Hi, my order is 123456789012_1, name AARAV, heart charm"]))
-assert f.get("product_name") == "AARAV" and f.get("charm") == "heart", f
+assert f.get("product_name") == "AARAV" and f.get("charm") == "46 (Red heart)", f
 print("  AI unavailable -> patterns still pick out the details")
 print("ALL OK (AI in context)")
 
@@ -212,10 +212,14 @@ async def test_guide():
         photo.reset_mock()
         messages, _, _ = await run(["Hi"])
         assert photo.await_count == 1 and not messages
-        for first in ("order 123456789012_1 name Meera, star charm", "123456789012_1"):
-            photo.reset_mock()
-            messages, _, _ = await run([first])
-            assert photo.await_count == 0 and messages  # the Order ID is already there: no example picture
+        photo.reset_mock()
+        messages, _, _ = await run(["order 123456789012_1 name Meera, star charm"])
+        assert photo.await_count == 0 and messages  # complete order: no picture at all
+        photo.reset_mock()
+        with patch.object(server, "CHARM_CHART", actual_guide):  # (any jpg stands in for the chart here)
+            messages, _, _ = await run(["123456789012_1"])
+        # the Order ID is there: no example picture, but the charm question comes with the charm chart
+        assert photo.await_count == 1 and photo.await_args.kwargs["text"].startswith(server.CHARM_CHART_NOTE), photo.await_args
         assert actual_guide.read_bytes()[:3] == bytes.fromhex("ffd8ff")
 
 asyncio.run(test_guide())

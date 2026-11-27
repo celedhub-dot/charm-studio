@@ -265,7 +265,7 @@ try:
         c.portal.call(chat)
         texts = [m["text"] for m in wa_sent[-5:]]
         check(texts[0] == "Namaste! Order ID bhejiye." and texts[1] == "Charm par kaunsa naam?", "bot uses custom questions")
-        check(texts[-1] == "Dhanyavaad from Priya Charms! 1234567890123_1 / Aarav / Heart / - {unknown}", "thank-you placeholders filled", texts[-1])
+        check(texts[-1] == "Dhanyavaad from Priya Charms! 1234567890123_1 / Aarav / 46 (Red heart) / - {unknown}", "thank-you placeholders filled", texts[-1])
 
         print("Rename and delete")
 

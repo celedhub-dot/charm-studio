@@ -256,3 +256,6 @@ ALTER TABLE team_reads ENABLE ROW LEVEL SECURITY;
 
 -- When the Order ID example picture was sent to this customer (sent at most once)
 ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS guide_sent_at timestamptz;
+
+-- When the charm chart picture was sent to this customer (with the charm question)
+ALTER TABLE wa_contacts ADD COLUMN IF NOT EXISTS charm_chart_sent_at timestamptz;

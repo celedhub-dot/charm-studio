@@ -135,7 +135,7 @@ try:
         check(len(replies_to(a)) == 1, "one reply for the whole burst", str(replies_to(a)))
         wait_for(lambda: c.get("/api/orders?q=123456789012", headers=H(tok)).json(), "order saved")
         o = c.get("/api/orders?q=123456789012", headers=H(tok)).json()[0]
-        check((o["product_name"], o["charm"], o["quantity"], o["colour"]) == ("AARAV", "5", "2", "black"), "name, charm number, quantity and colour saved", o)
+        check((o["product_name"], o["charm"], o["quantity"], o["colour"]) == ("AARAV", "5 (Infinity love)", "2", "black"), "name, charm number, quantity and colour saved", o)
         check("Quantity: 2" in replies_to(a)[0] and "Colour: black" in replies_to(a)[0], "thank-you lists colour and quantity", replies_to(a)[0])
         for k, closing in enumerate(("none", "ok thanks 👍")):
             msg(c, hook, f"a{4 + k}", a, closing)
@@ -150,7 +150,7 @@ try:
         msg(c, hook, "b2", b, "no")
         wait_for(lambda: c.get("/api/orders?q=987654321098", headers=H(tok)).json(), "order saved")
         o = c.get("/api/orders?q=987654321098", headers=H(tok)).json()[0]
-        check((o["order_id"], o["product_name"], o["charm"], o["quantity"]) == ("987654321098_1", "KABIR", "12", "1"), "numbered reply mapped to the shop's fields", o)
+        check((o["order_id"], o["product_name"], o["charm"], o["quantity"]) == ("987654321098_1", "KABIR", "12 (Love (script))", "1"), "numbered reply mapped to the shop's fields", o)
 
         print("Plain values one per line, in the shop's order")
         d = "919000000013"
@@ -159,7 +159,7 @@ try:
         wait_for(lambda: replies_to(d), "bot replies")
         wait_for(lambda: c.get("/api/orders?q=555566667777", headers=H(tok)).json(), "order saved")
         o = c.get("/api/orders?q=555566667777", headers=H(tok)).json()[0]
-        check((o["product_name"], o["charm"], o["quantity"]) == ("Meera", "7", "3"), "unlabelled lines follow the shop's list", o)
+        check((o["product_name"], o["charm"], o["quantity"]) == ("Meera", "7 (Anchor with crest)", "3"), "unlabelled lines follow the shop's list", o)
         # A detail sent after the order is saved updates that same order (no AI here, so the pattern reads "gift wrap").
         msg(c, hook, "d2", d, "gift wrap please")
         wait_for(lambda: "gift wrap" in (c.get("/api/orders?q=555566667777", headers=H(tok)).json()[0]["notes"] or ""),

@@ -97,6 +97,18 @@ async def fake_set_webhook(api_key, url):
 
 server.send_wa = fake_send
 server.send_order_guide = fake_guide
+
+
+async def fake_chart(cfg, customer, caption):
+    caption = f"{server.CHARM_CHART_NOTE}\n\n{caption}" if caption else server.CHARM_CHART_NOTE
+    sent.append((customer, "[charm chart] " + caption))
+    await server.record_message(cfg["logical_id"], customer, "out", "image", caption, None, "sent", "bot")
+    await server.db().execute("UPDATE wa_contacts SET charm_chart_sent_at = now() WHERE number_label=$1 AND customer_phone=$2",
+                              cfg["logical_id"], customer)
+    return True
+
+
+server.send_charm_chart = fake_chart
 server.fetch_media = fake_fetch
 server.ocr_text = fake_ocr
 server.claude_text = fake_claude
@@ -241,6 +253,44 @@ try:
         r = wait_n(K, 2)
         o = orders(K)
         check(len(o) == 1 and o[0]["charm"] == "" and "saved" in r[-1].lower(), "answering 'Keychain' to the charm question: no charm, order saved", (o, r[-1:]))
+
+        time.sleep(4)
+        print("Charm chart")
+        W = "919000000306"
+        OCR_TEXT["MW"] = "Order #357700000000000123\nCustomised Wallet for Men with Name & Charm Customization Blue\nmeesho"
+        BOT_TURNS[W] = [{"product_name": "Kabir", "action": "collect"}]
+        msg("w1", W, image="MW")
+        msg("w2", W, "Name Kabir")
+        r = wait_n(W, 1)
+        check(r[-1].startswith("[charm chart]") and server.CHARM_CHART_NOTE in r[-1] and "charm" in r[-1].lower(),
+              "wallet: the charm question comes with the charm chart", r[-1:])
+        BOT_TURNS[W] = [{"charm": "crown", "action": "collect"}]
+        msg("w3", W, "crown")
+        r = wait_n(W, 2)
+        check("2, 3 or 4" in r[-1] and not orders(W)[0]["charm"], "'crown' fits 3 charms: asks which number", r[-1:])
+        BOT_TURNS[W] = [{"action": "collect"}]
+        msg("w4", W, "3")
+        r = wait_n(W, 3)
+        check(orders(W)[0]["charm"] == "3 (Crown)" and "saved" in r[-1].lower(), "'3' saves '3 (Crown)'", (orders(W), r[-1:]))
+        check(sum(x.startswith("[charm chart]") for x in replies(W)) == 1, "chart sent once with the question")
+        msg("w5", W, "what is charm? show options")
+        r = wait_n(W, 4)
+        check(r[-1].startswith("[charm chart]"), "'what is charm / options' sends the chart again", r[-1:])
+        time.sleep(4)
+        O = "919000000307"
+        BOT_TURNS[O] = [{"order_id": "357800000000000321", "product_name": "Shiv", "charm": "Om", "action": "collect"}]
+        msg("o1", O, "357800000000000321 wallet name Shiv, Om charm")
+        wait_n(O, 1)
+        check(orders(O) and orders(O)[0]["charm"] == "52 (Om)", "'Om' saved as '52 (Om)'", orders(O))
+        BOT_TURNS[O] = [{"action": "silent"}]
+        msg("o2", O, "This is the wrong charm, not this")
+        r = wait_n(O, 2)
+        check(r[-1].startswith("[charm chart]") and "number 52 is Om" in r[-1] and "send its number" in r[-1],
+              "a doubt about the charm: tells the chart's name for their number, with the chart", r[-1:])
+        BOT_TURNS[O] = [{"charm": "46", "action": "collect"}]
+        msg("o3", O, "46")
+        r = wait_n(O, 3)
+        check(orders(O)[0]["charm"] == "46 (Red heart)" and "Charm: 46 (Red heart)" in r[-1], "a new number updates the charm", (orders(O), r[-1:]))
 
         time.sleep(4)
         print("Shop facts reach the AI")

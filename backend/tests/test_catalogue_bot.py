@@ -97,6 +97,18 @@ async def fake_set_webhook(api_key, url):
 
 server.send_wa = fake_send
 server.send_order_guide = fake_guide
+
+
+async def fake_chart(cfg, customer, caption):
+    caption = f"{server.CHARM_CHART_NOTE}\n\n{caption}" if caption else server.CHARM_CHART_NOTE
+    sent.append((customer, "[charm chart] " + caption))
+    await server.record_message(cfg["logical_id"], customer, "out", "image", caption, None, "sent", "bot")
+    await server.db().execute("UPDATE wa_contacts SET charm_chart_sent_at = now() WHERE number_label=$1 AND customer_phone=$2",
+                              cfg["logical_id"], customer)
+    return True
+
+
+server.send_charm_chart = fake_chart
 server.fetch_media = fake_fetch
 server.ocr_text = fake_ocr
 server.claude_text = fake_claude
@@ -269,7 +281,7 @@ try:
         rows = [x for x in c.get("/api/orders", headers=H(tok)).json() if x.get("customer_phone") == F]
         by = {x["notes"].split(";")[0]: x for x in rows}
         check(len(rows) == 3 and {x["order_id"] for x in rows} == {"357111111111111111"}, "three rows, one order ID", rows)
-        check(by["Item: Wallet"]["product_name"] == "Aarav" and by["Item: Wallet"]["charm"] == "5"
+        check(by["Item: Wallet"]["product_name"] == "Aarav" and by["Item: Wallet"]["charm"] == "5 (Infinity love)"
               and by["Item: Pen"]["product_name"] == "Dev" and not by["Item: Pen"]["charm"], "each item's name; charm only where it applies", by)
         check(server.label_status(["357111111111111111"], rows) == "matched", "one label for the combo")
 

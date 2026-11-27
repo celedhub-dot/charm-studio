@@ -10,6 +10,7 @@ from email.utils import parseaddr
 import hashlib
 from contextvars import ContextVar
 import catalogue as cat
+import charms
 import engraving
 import employees
 import hmac
@@ -2306,9 +2307,64 @@ def missing_questions(fields: Dict[str, str]) -> str:
             names = combo_names(fields)
             missing = [i for i in fields["_items"].split(",") if not names.get(i)]
             lines.append("Please send the name for each item:\n" + "\n".join(f"{item_label(i)} -" for i in missing))
+        elif key == "charm" and fields.get("_charm_pick"):
+            nums = fields["_charm_pick"].split(",")
+            lines.append(f"Which one? Please send the charm number: {', '.join(nums[:-1])} or {nums[-1]} (see the charm chart).")
         else:
             lines.append(bot_text(f"ask_{key}"))
     return "\n".join(lines)
+
+
+CHARM_CHART = Path(__file__).with_name("charm-chart.jpg")
+CHARM_CHART_NOTE = "\U0001F48E Our charm chart: send the number of the charm you'd like."
+CHARM_HELP_RE = re.compile(
+    r"charm.{0,40}(?:option|list|kaun|konsa|kon sa|which|show|photo|pic|chart|dikha|bhej|kya hai|kya h\b|what|meaning|matlab|design)"
+    r"|(?:option|list|show|dikha|bhej|photo|pic|chart|what is|kya hai|matlab).{0,30}charm", re.I)
+
+
+CHARM_DOUBT_RE = re.compile(
+    r"charm.{0,40}(?:wrong|galat|not|nahi|nhi|nahin|doubt|sure|which one|kaun|kya|kaisa|different|alag|change|badal)"
+    r"|(?:wrong|galat|different|alag|change|badal|not this|ye nahi).{0,30}charm", re.I)
+
+
+def apply_charm(fields: Dict[str, str]) -> None:
+    """A charm name/number from the chart becomes '52 (Om)'; a name that fits several charms asks which number."""
+    value = (fields.get("charm") or "").strip()
+    if not value or fields.get("_charm_ok") == value:
+        return
+    picked, options = charms.resolve(value)
+    if picked:
+        fields["charm"] = picked
+        fields["_charm_ok"] = picked
+        fields.pop("_charm_pick", None)
+    elif options:
+        fields.pop("charm", None)  # e.g. "crown": ask 2, 3 or 4
+        fields["_charm_pick"] = ",".join(str(n) for n in options)
+    else:
+        fields["_charm_ok"] = value  # a custom request ("aiims logo", a name): kept as written
+
+
+async def send_charm_chart(cfg: Dict[str, Any], customer: str, caption: str) -> bool:
+    caption = f"{CHARM_CHART_NOTE}\n\n{caption}" if caption else CHARM_CHART_NOTE
+    if len(caption) > 1024 or not CHARM_CHART.is_file():
+        return False
+    try:
+        data = CHARM_CHART.read_bytes()
+        media_id = await wa_upload(cfg, data, "image/jpeg", CHARM_CHART.name)
+        _cache_media(media_id, data, "image/jpeg")
+        response = await send_payload(
+            cfg, customer, {"messaging_product": "whatsapp", "to": customer, "type": "image",
+                            "image": {"id": media_id, "caption": caption}},
+            kind="image", text=caption, source="bot",
+            media={"media_id": media_id, "media_mime": "image/jpeg", "media_name": CHARM_CHART.name},
+        )
+        if response.is_success:
+            await db().execute("UPDATE wa_contacts SET charm_chart_sent_at = now() WHERE number_label=$1 AND customer_phone=$2",
+                               cfg["logical_id"], customer)
+        return response.is_success
+    except Exception as exc:  # noqa: BLE001  (never block the reply: fall back to text)
+        log.warning("Could not send the charm chart: %s", type(exc).__name__)
+    return False
 
 
 def item_label(item: str) -> str:
@@ -2719,6 +2775,12 @@ async def prompt_for_details(cfg, customer, fields, step, language="", answer=""
         fields["_guide_sent"] = "yes"
         await db().execute(UPSERT_CONV_SQL, cfg["logical_id"], customer, step, fields)
         return
+    # the charm chart: with the charm question (products that take a charm), once per customer
+    if step_filled(fields, "order_id") and not step_filled(fields, "charm"):
+        chart_before = await db().fetchval(
+            "SELECT charm_chart_sent_at IS NOT NULL FROM wa_contacts WHERE number_label=$1 AND customer_phone=$2", cfg["logical_id"], customer)
+        if not chart_before and await send_charm_chart(cfg, customer, question):
+            return
     await send_wa(cfg, customer, question)
 
 
@@ -3295,6 +3357,11 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
         await db().execute(UPSERT_CONV_SQL, biz, customer, 0, fields)
         await prompt_for_details(cfg, customer, fields, 0, language)
         return
+    # Rule: "what is a charm / show options" gets the charm chart (any time, even if sent before)
+    if CHARM_HELP_RE.search(cleaned) and not detect_ids(cleaned):
+        caption = await localize_reply("Please send the number of the charm you'd like.", language)
+        if await send_charm_chart(cfg, customer, caption):
+            return
 
     # Rule: once this customer's order is saved, later messages are changes, extra instructions, questions or chat.
     # The bot never restarts the order or asks for the Order ID again (unless they send a different ID / a new order).
@@ -3432,6 +3499,11 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
             await send_wa(cfg, customer, "\n\n".join(filter(None, (answer, confirmation))))
             return
 
+    if fields.get("_charm_pick") and not fields.get("charm") and said:
+        picked = [int(x) for x in re.findall(r"\b\d{1,2}\b", said) if x in fields["_charm_pick"].split(",")]
+        if picked:  # "3" after "Which crown? 2, 3 or 4"
+            fields["charm"] = str(picked[0])
+    apply_charm(fields)  # chart charm -> "52 (Om)"; "crown" -> ask 2, 3 or 4
     step = next_step(fields)
     if step >= len(STEP_KEYS) or (FEWER_FOLLOWUPS and STEP_KEYS[step] == "notes"):
         base = {
@@ -3562,6 +3634,24 @@ async def follow_up(cfg: Dict[str, Any], customer: str, order: asyncpg.Record, t
         if name and not name.lower().replace(".", "").startswith(prefix.lower().replace(".", "")):
             understood["product_name"] = f"{prefix} {name}"
     changes: Dict[str, str] = {}
+    # Rule: a doubt about the charm gets the chart's name for their number, and how to change it
+    if not understood.get("charm") and current["charm"] and CHARM_DOUBT_RE.search(said):
+        m = re.match(r"(\d{1,2}) \((.+)\)$", current["charm"])
+        if m:
+            reply = await localize_reply(
+                f"As per our charm chart, number {m.group(1)} is {m.group(2)}. If you'd like a different charm, "
+                "please send its number from the chart.", language)
+            if not await send_charm_chart(cfg, customer, reply):
+                await send_wa(cfg, customer, reply)
+            return
+    if understood.get("charm"):
+        picked, options = charms.resolve(understood["charm"])
+        if picked:
+            understood["charm"] = picked
+        elif options:  # "change to crown": ask which number
+            understood.pop("charm")
+            await send_wa(cfg, customer, f"Which one? Please send the charm number: {', '.join(map(str, options[:-1]))} or {options[-1]}.")
+            return
     for k in ("product_name", "charm", "colour", "quantity"):
         v = (understood.get(k) or "").strip()
         if v and v != current[k]:
@@ -3587,12 +3677,16 @@ async def follow_up(cfg: Dict[str, Any], customer: str, order: asyncpg.Record, t
 
 def product_context(fields: Dict[str, str]) -> str:
     """One line for the AI about the ordered product: only which details it needs (never prices)."""
-    if not fields.get("_product"):
-        return ""
+    if not fields.get("_product"):  # product unknown: the charm chart still helps turn names into numbers
+        return "" if fields.get("_no_charm") else ("Charm chart (number name): " + charms.chart_text()
+                                                   + ". Return the charm as its number when exactly one fits; if several fit, return the word")
     bits = [f"Product ordered: {fields['_product'][:120]}"]
     if fields.get("_items"):
         bits.append("Items needing a name: " + ", ".join(item_label(i) for i in fields["_items"].split(",")))
     bits.append("Charm needed: " + ("no" if fields.get("_no_charm") else "yes"))
+    if not fields.get("_no_charm"):
+        bits.append("Charm chart (number name): " + charms.chart_text() + ". Return the charm the customer chose as its number "
+                    "when exactly one fits; if several fit (e.g. crown = 2, 3, 4) return the word")
     if fields.get("_no_name"):
         bits.append("No name needed")
     return ". ".join(bits)
