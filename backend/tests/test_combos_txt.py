@@ -158,6 +158,31 @@ try:
         check(r["charm"] == "46 (Red heart), 9 (Doctor symbol), 5 (Infinity love)" and r["extra_charms"] == "", "payment confirmed: the extra charm joins the label", r)
         check(c.post(f"/api/orders/{e['id']}/extra-charms", headers=H(tok), json={"confirm": True}).status_code == 400, "nothing left to confirm")
 
+        print("Customer Data export to Excel")
+        import io as _io
+        import openpyxl
+        c.post("/api/orders", headers=H(tok), json={"order_id": "357912340000111122", "product_name": "Priya ❤️", "charm": "46 (Red heart)",
+                                                    "customer_phone": "919000000501", "channel": "Shop"})
+        x = c.get("/api/customer-data/export.xlsx", headers=H(tok), params={"phone": "9000000501"})
+        check(x.status_code == 200 and x.headers["content-disposition"].endswith('.xlsx"'), "Excel file downloaded", x.text[:200])
+        ws = openpyxl.load_workbook(_io.BytesIO(x.content)).active
+        rows = list(ws.iter_rows(values_only=True))
+        check(rows[0][:5] == ("Customer", "Phone", "WhatsApp number", "Date and time", "Order ID"), "header row", rows[0])
+        check(len(rows) == 2 and rows[1][4] == "357912340000111122" and rows[1][6] == "Priya ❤️" and rows[1][8] == "46 (Red heart)"
+              and rows[1][1] == "+919000000501", "the filtered record, order ID kept as text, emoji kept", rows[1:])
+        check(ws.auto_filter.ref and ws.auto_filter.ref.startswith("A1"), "filter dropdowns on the header row")
+        c.post("/api/orders", headers=H(tok), json={"order_id": "357912340000222233", "product_name": "Kabir", "notes": "Item: Pen",
+                                                    "customer_phone": "919000000502", "channel": "Other"})
+        cx = c.get("/api/customer-data/export.xlsx", headers=H(tok),
+                   params={"phone": "90000005", "columns": "order_id,product_name,status", "numbers": "Shop", "statuses": "saved"})
+        crow = list(openpyxl.load_workbook(_io.BytesIO(cx.content)).active.iter_rows(values_only=True))
+        check(crow == [("Order ID", "Engraving name", "Status"), ("357912340000111122", "Priya ❤️", "Saved order")],
+              "custom export: only the chosen columns, number and status", crow)
+        px = c.get("/api/customer-data/export.xlsx", headers=H(tok), params={"phone": "90000005", "columns": "order_id,product", "products": "pen"})
+        prow = list(openpyxl.load_workbook(_io.BytesIO(px.content)).active.iter_rows(values_only=True))
+        check(prow == [("Order ID", "Product"), ("357912340000222233", "Pen")], "custom export: product type filter", prow)
+        check(c.get("/api/customer-data/export.xlsx", headers=H(tok), params={"completeness": "maybe"}).status_code == 400, "bad choice refused")
+
         print(".txt from Label Studio and from a filled PDF")
         c.post("/api/orders", headers=H(tok), json={"order_id": "357911112222333344", "product_name": "Kabir"})
         src = pymupdf.open()

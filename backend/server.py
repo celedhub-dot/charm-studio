@@ -5099,10 +5099,9 @@ async def _thread(label: str, phone: str) -> Dict[str, Any]:
     }
 
 
-@api.get("/customer-data")
-async def customer_data(phone: str = "", order_id: str = "", missing: str = "", having: str = "",
-                        since: Optional[datetime] = None, until: Optional[datetime] = None,
-                        offset: int = Query(0, ge=0)):
+async def query_customer_data(phone: str, order_id: str, missing: str, having: str, since: Optional[datetime],
+                              until: Optional[datetime], offset: int, limit: int) -> List[asyncpg.Record]:
+    """Customer Data rows for the filters (newest first): saved orders, details being collected, chats."""
     required = [k for k in having.split(",") if k]
     if set(required) - {"order_id", "product_name", "charm", "colour", "quantity", "notes"}:
         raise HTTPException(400, "Unknown detail filter")
@@ -5138,8 +5137,16 @@ async def customer_data(phone: str = "", order_id: str = "", missing: str = "", 
           AND ($4::timestamptz IS NULL OR at >= $4) AND ($5::timestamptz IS NULL OR at <= $5)
           AND NOT EXISTS (SELECT 1 FROM unnest($7::text[]) AS h(field)
                           WHERE nullif(trim(details->>h.field),'') IS NULL)
-        ORDER BY at DESC,label,phone,key LIMIT 51 OFFSET $6
-    """, re.sub(r"\D", "", phone), norm_id(order_id), missing, since, until, offset, required, id_prefix(order_id))
+        ORDER BY at DESC,label,phone,key LIMIT $9 OFFSET $6
+    """, re.sub(r"\D", "", phone), norm_id(order_id), missing, since, until, offset, required, id_prefix(order_id), limit)
+    return rows
+
+
+@api.get("/customer-data")
+async def customer_data(phone: str = "", order_id: str = "", missing: str = "", having: str = "",
+                        since: Optional[datetime] = None, until: Optional[datetime] = None,
+                        offset: int = Query(0, ge=0)):
+    rows = await query_customer_data(phone, order_id, missing, having, since, until, offset, 51)
     total = int(rows[0]["total_rows"]) if rows else 0
     if not rows and offset:  # past the last page: still report how many there are
         total = None
@@ -5149,6 +5156,122 @@ async def customer_data(phone: str = "", order_id: str = "", missing: str = "", 
         d.pop("total_rows", None)
         out.append(d)
     return {"rows": out, "more": len(rows) > 50, "total": total, "page_size": 50}
+
+
+CUSTOMER_DATA_FIELDS = [("order_id", "Order ID"), ("product_name", "Engraving name"), ("caption", "Caption"),
+                        ("charm", "Charm"), ("colour", "Colour"), ("quantity", "Quantity"), ("notes", "Notes")]
+# every column the export can have, in order: key -> (header, width)
+EXPORT_COLUMNS = {
+    "customer": ("Customer", 22), "phone": ("Phone", 16), "number": ("WhatsApp number", 20), "date": ("Date and time", 18),
+    "order_id": ("Order ID", 22), "product": ("Product", 30), "product_name": ("Engraving name", 26), "caption": ("Caption", 22),
+    "charm": ("Charm", 18), "colour": ("Colour", 10), "quantity": ("Quantity", 8), "notes": ("Notes", 40),
+    "missing": ("Missing required details", 26), "status": ("Status", 22),
+}
+EXPORT_STATUSES = {"saved": "Saved order", "in_progress": "In progress", "collecting": "Being collected by the bot",
+                   "waiting": "Waiting", "chat": "Chat only"}
+# product types for the filter (from the item each order is for)
+EXPORT_PRODUCTS = ["wallet", "purse", "clutch", "passport cover", "leather keychain", "keychain", "pen", "bottle",
+                   "bracelet", "kada", "rakhi", "chain", "luggage tag", "sunglasses cover", "other"]
+
+
+def export_status(r, d) -> str:
+    key = str(r["key"])
+    if key == "current":
+        return "collecting"
+    if key.startswith("pending-"):
+        return "waiting"
+    if key == "contact":
+        return "chat"
+    return "in_progress" if d.get("source") in PARTIAL_SOURCES else "saved"
+
+
+def export_product_types(title: str) -> List[str]:
+    out = []
+    for item in cat.items_in(title or ""):
+        if item == "bracelet" and re.search(r"\bkad(?:a|aa|e)\b|\bkara\b|\bkangan\b|\bkangna\b", (title or "").lower()):
+            item = "kada"
+        elif item == "metal keychain":
+            item = "keychain"
+        out.append(item)
+    return out or ["other"]
+
+
+@api.get("/customer-data/export.xlsx")
+async def export_customer_data(phone: str = "", order_id: str = "", missing: str = "", having: str = "",
+                               since: Optional[datetime] = None, until: Optional[datetime] = None,
+                               tz: int = Query(330, ge=-720, le=840), columns: str = "", numbers: str = "",
+                               statuses: str = "", products: str = "", completeness: str = ""):
+    """Customer Data as an Excel file: the page's filters, plus (custom export) the columns to include, which
+    WhatsApp numbers, statuses, product types and complete / missing details. Every column gets a filter dropdown."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    cols = [c for c in columns.split(",") if c in EXPORT_COLUMNS] or list(EXPORT_COLUMNS)
+    want_numbers = {n for n in numbers.split(",") if n}
+    want_status = {x for x in statuses.split(",") if x in EXPORT_STATUSES}
+    want_products = {x for x in products.split(",") if x in EXPORT_PRODUCTS}
+    if completeness not in ("", "complete", "missing"):
+        raise HTTPException(400, "completeness must be complete or missing")
+    rows = await query_customer_data(phone, order_id, missing, having, since, until, 0, 100000)
+    # the product each chat ordered, read from its order screenshot (when there is one)
+    shots = {(r["number_label"], r["customer_phone"]): r["product"] for r in await db().fetch(
+        "SELECT DISTINCT ON (number_label, customer_phone) number_label, customer_phone, "
+        "substring(ai_note from 'Product: ([^|]+)') AS product FROM wa_messages "
+        "WHERE direction='in' AND ai_note LIKE '%Product:%' ORDER BY number_label, customer_phone, created_at DESC")}
+    labels = dict(CUSTOMER_DATA_FIELDS)
+    shift = timedelta(minutes=tz)
+    out_rows = []
+    for r in rows:
+        d = r["details"] if isinstance(r["details"], dict) else json.loads(r["details"] or "{}")
+        if want_numbers and r["label"] not in want_numbers:
+            continue
+        status = export_status(r, d)
+        if want_status and status not in want_status:
+            continue
+        if completeness == "complete" and r["missing_fields"]:
+            continue
+        if completeness == "missing" and not r["missing_fields"]:
+            continue
+        item = re.search(r"Item:\s*([^;]+)", d.get("notes") or "")
+        product = (item.group(1).strip() if item else "") or d.get("_product") or (shots.get((r["label"], r["phone"])) or "").strip()
+        if want_products and not set(export_product_types(product)) & want_products:
+            continue
+        values = {
+            "customer": r["name"] or "", "phone": f"+{r['phone']}" if r["phone"] else "", "number": r["label"] or "",
+            "date": (r["at"] + shift).replace(tzinfo=None) if r["at"] else None, "product": product,
+            "missing": ", ".join(labels.get(f, f) for f in r["missing_fields"]) or "Complete",
+            "status": EXPORT_STATUSES[status],
+        }
+        for k in ("order_id", "product_name", "caption", "charm", "colour", "quantity", "notes"):
+            values[k] = re.sub(r"(?:^|;\s*)Item:[^;]*;?\s*", "", str(d.get(k) or "")).strip() if k == "notes" else str(d.get(k) or "")
+        out_rows.append([values[c] for c in cols])
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Customer Data"
+    ws.append([EXPORT_COLUMNS[c][0] for c in cols])
+    for row in out_rows:
+        ws.append(row)
+    bold, fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="2D4A22")
+    for cell in ws[1]:
+        cell.font, cell.fill = bold, fill
+    for i, c in enumerate(cols, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = EXPORT_COLUMNS[c][1]
+    for row in ws.iter_rows(min_row=2):
+        for i, c in enumerate(cols):
+            cell = row[i]
+            cell.alignment = Alignment(vertical="top", wrap_text=c in ("product", "product_name", "caption", "notes"))
+            if c == "date":
+                cell.number_format = "dd-mm-yyyy hh:mm"
+            elif c in ("phone", "order_id"):
+                cell.number_format = "@"  # long numbers stay text (Excel would round them)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions  # a filter dropdown on every column
+    buf = io.BytesIO()
+    wb.save(buf)
+    stamp = (now_utc() + shift).strftime("%Y-%m-%d")
+    return Response(content=buf.getvalue(),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="customer-data-{stamp}.xlsx"',
+                             "X-Rows": str(len(out_rows))})
 
 
 @api.get("/inbox/conversations/{label}/{phone}")

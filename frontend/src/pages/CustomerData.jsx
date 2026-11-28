@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
-import { api, errorMessage } from "../lib/api";
+import { toast } from "sonner";
+import { FileXls, SlidersHorizontal } from "@phosphor-icons/react";
+import CustomExportDialog from "../components/CustomExportDialog";
+import { api, errorMessage, downloadBlob, filenameFromDisposition } from "../lib/api";
+import { Button } from "../components/ui/button";
+import { Spinner } from "../components/ui/primitives";
+import { useSession } from "../lib/session";
 import { PageHeader } from "../components/common";
 
 const fields = { order_id: "Order ID", product_name: "Engraving name", charm: "Charm", colour: "Colour", quantity: "Quantity", notes: "Notes" };
@@ -51,8 +57,50 @@ export default function CustomerData() {
     return () => { clearTimeout(timer); clearInterval(refresh); controller.abort(); };
   }, [filters, offset]);
   const inputClass = "block mt-1 w-full rounded-lg border border-line bg-white p-2";
+  const { me } = useSession();
+  const canExport = me?.role !== "employee" || me.permissions?.includes("exports");
+  const [exporting, setExporting] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
+  const exportExcel = async (chosen = filters) => {
+    setExporting(true);
+    try {
+      const params = { ...chosen, having: (chosen.having || []).join(","), tz: -new Date().getTimezoneOffset() };
+      for (const key of ["since", "until"]) {
+        if (params[key]) params[key] = new Date(new Date(params[key]).getTime() + (key === "until" ? 59999 : 0)).toISOString();
+        else delete params[key];
+      }
+      const res = await api.get("/customer-data/export.xlsx", { params, responseType: "blob" });
+      downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "customer-data.xlsx"));
+      toast.success(`Excel file ready: ${Number(res.headers["x-rows"] || 0).toLocaleString()} records`);
+      setCustomOpen(false);
+    } catch (e) {
+      let msg = errorMessage(e);
+      if (e?.response?.data instanceof Blob) {
+        try { msg = JSON.parse(await e.response.data.text()).detail || msg; } catch { /* keep default */ }
+      }
+      toast.error(msg);
+    } finally {
+      setExporting(false);
+    }
+  };
   return <main>
-    <PageHeader title="Customer Data" subtitle="Review order details and follow up with customers in Chats." />
+    <PageHeader
+      title="Customer Data"
+      subtitle="Review order details and follow up with customers in Chats."
+      actions={canExport && (
+        <>
+          <Button variant="outline" onClick={() => setCustomOpen(true)} disabled={exporting} data-testid="customer-data-custom-export-btn"
+            title="Choose the columns, dates, numbers, status, product type and missing details for the Excel file">
+            <SlidersHorizontal size={18} /> Custom export
+          </Button>
+          <Button variant="outline" onClick={() => exportExcel()} disabled={exporting} data-testid="customer-data-export-btn"
+            title="Download every record matching the filters below as an Excel file">
+            {exporting && !customOpen ? <Spinner /> : <FileXls size={18} />} Export to Excel
+          </Button>
+        </>
+      )}
+    />
+    <CustomExportDialog open={customOpen} onClose={() => setCustomOpen(false)} pageFilters={filters} onExport={exportExcel} busy={exporting} />
     <div className="mb-5 grid gap-3 rounded-xl border border-line bg-white p-4 sm:grid-cols-2 lg:grid-cols-5">
       {[["phone","Phone","tel"],["order_id","Order ID","text"],["since","From (local time)","datetime-local"],["until","Through (local time)","datetime-local"]].map(([key,label,type]) =>
         <label key={key}>{label}<input className={inputClass} type={type} value={filters[key]} onChange={e => change(key,e.target.value)} /></label>)}

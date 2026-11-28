@@ -19,7 +19,7 @@ PERMISSIONS = {
 
 # All permissions in a tuple are required. Sending returns a chat transcript.
 ENDPOINTS = {
-    "customer_data": ("customers",), "inbox_conversations": ("chats",),
+    "customer_data": ("customers",), "export_customer_data": ("customers", "exports"), "inbox_conversations": ("chats",),
     "inbox_unread": ("chats",), "inbox_thread": ("chats",), "inbox_media": ("chats",),
     "inbox_send": ("chats", "text"), "inbox_bot_pause": ("chats", "text"), "inbox_send_media": ("chats", "media"),
     "inbox_templates": ("templates",), "inbox_send_template": ("chats", "templates"),
