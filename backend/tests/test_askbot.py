@@ -41,8 +41,9 @@ class FakeDB:
 
     async def fetch(self, q, *a):  # recent chat for context: the shop's greeting, if a test sets one
         if "FROM orders" in q:
+            partial = "NOT IN ('screenshot','pending')" in q  # like the real query: early saves aren't finished orders
             return [o for o in saved if o["channel"] == a[0] and o["customer_phone"] == a[1]
-                    and (not a[2] or o["order_id"] == a[2])][:2]
+                    and (not a[2] or o["order_id"] == a[2]) and not (partial and o.get("source") in ("screenshot", "pending"))][:2]
         history = state.get("history", [])
         return list(reversed(history)) if "ORDER BY created_at DESC" in q else history
 
@@ -90,7 +91,8 @@ async def run(msgs, history=None):
         state["history"] = history
     for m in msgs:
         await server.handle_bot_message(cfg, "918429172126", m)
-    return list(sent), dict(state.get("fields", {})), list(saved)
+    # "pending" rows are the Order ID saved early ("in progress"); the tests check the finished orders
+    return list(sent), dict(state.get("fields", {})), [x for x in saved if x.get("source") != "pending"]
 
 
 s, f, _ = asyncio.run(run(["Hi", "Hi, my order is 123456789012_1, name AARAV, heart charm"]))

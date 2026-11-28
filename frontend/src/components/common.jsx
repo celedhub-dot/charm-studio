@@ -46,8 +46,14 @@ const SOURCE_STYLE = {
   whatsapp: "default",
 };
 
+const SOURCE_LABEL = { ai: "AI", pending: "In progress", screenshot: "From screenshot" };
+
 export function SourceBadge({ source }) {
-  return <Badge variant={SOURCE_STYLE[source] || "neutral"}>{source === "ai" ? "AI" : source || "manual"}</Badge>;
+  return (
+    <Badge variant={SOURCE_STYLE[source] || "neutral"} title={source === "pending" ? "Order ID saved; the bot is still collecting the other details" : undefined}>
+      {SOURCE_LABEL[source] || source || "manual"}
+    </Badge>
+  );
 }
 
 export function EmptyState({ icon: Icon, title, text, action }) {

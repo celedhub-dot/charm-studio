@@ -76,7 +76,8 @@ ORDER_COLUMNS = (
     "caption, extra_charms"
 )
 ORDER_SELECT = ORDER_COLUMNS + ", confirmed_at"  # confirmed_at is set by sending a template, never inserted
-SOURCES = ("manual", "ai", "csv", "whatsapp", "screenshot")  # screenshot: order ID read from a photo, details still to come
+SOURCES = ("manual", "ai", "csv", "whatsapp", "screenshot", "pending")  # screenshot / pending: order ID known (photo / typed), details still to come
+PARTIAL_SOURCES = ("screenshot", "pending")
 
 SCHEMA_SQL = (ROOT_DIR / "schema.sql").read_text(encoding="utf-8")
 
@@ -2540,8 +2541,7 @@ ORDER_ID_GUIDE_MEESHO = Path(__file__).with_name("order-id-guide-meesho.jpg")  #
 
 
 COMBO_NAME_QUESTION = "Please send one name for all items, or a different name for each:"
-PRODUCT_QUESTION = ("Which product did you order (for example wallet, keychain, kada, pen)? "
-                    "If it takes a charm, please send the charm number too.")
+PRODUCT_QUESTION = "Which product did you order? For example: wallet, keychain, kada, pen."  # the charm is asked after, only if it takes one
 SCREENSHOT_AGAIN = "Thanks! Please also send a screenshot of this order from your {platform} app, so we know which product it is."
 
 
@@ -2692,6 +2692,33 @@ async def send_charm_chart(cfg: Dict[str, Any], customer: str, caption: str) -> 
 def item_label(item: str) -> str:
     return {"metal keychain": "Keychain", "leather keychain": "Leather keychain", "passport cover": "Passport cover",
             "luggage tag": "Luggage tag", "sunglasses cover": "Sunglasses cover"}.get(item, item.capitalize())
+
+
+_EMOJI_RUN = r"(?:[©®‼-㊙\U0001F000-\U0010FFFF‍︎️⃣]+)"
+
+
+def keep_emojis(name: str, said: str) -> str:
+    """The AI sometimes drops emojis from a name ('chinnu😘' -> 'chinnu'). Put back the emojis the customer wrote
+    right before or after each name, so they're saved and printed as written."""
+    if not name or not said or not re.search(_EMOJI_RUN, said):
+        return name
+    out = []
+    for part in re.split(r"(\s*\|\s*)", name):
+        m = re.match(r"(\s*[A-Za-z ]{2,20}?:\s*)?(.+)", part) if part.strip() and "|" not in part else None
+        if not m:
+            out.append(part)
+            continue
+        label, value = m.group(1) or "", m.group(2).strip()
+        if re.search(_EMOJI_RUN, value):
+            out.append(part)  # already has its emojis
+            continue
+        hit = re.search(rf"({_EMOJI_RUN}\s?)?{re.escape(value)}(\s?{_EMOJI_RUN})?", said, re.I)
+        if hit and (hit.group(1) or hit.group(2)):
+            out.append(label + (hit.group(1) or "") + said[hit.start() + len(hit.group(1) or ""):hit.start() + len(hit.group(1) or "") + len(value)]
+                       + (hit.group(2) or ""))
+        else:
+            out.append(part)
+    return "".join(out)
 
 
 def per_item(value: str, items: List[str], one_for_all: bool = True) -> Dict[str, str]:
@@ -2994,9 +3021,18 @@ async def chat_needs_order_id(label: str, customer: str) -> bool:
         label, customer)
 
 
+async def chat_needs_product(label: str, customer: str) -> bool:
+    """True while an order is being collected without knowing the product (the bot asked for the screenshot)."""
+    fields = await db().fetchval(
+        "SELECT fields FROM wa_conversations WHERE business_number_id=$1 AND customer_phone=$2", label, customer)
+    fields = fields if isinstance(fields, dict) else (json.loads(fields) if fields else {})
+    return bool(fields.get("order_id")) and not fields.get("_product")
+
+
 async def read_new_screenshots(cfg: Dict[str, Any], label: str, customer: str, since: datetime) -> None:
-    """Read the chat's unread photos since `since` while it still has no order ID; stop at the first ID found."""
-    if not await chat_needs_order_id(label, customer):
+    """Read the chat's unread photos since `since` while it has no order ID yet, or the product isn't known yet
+    (the bot asked for the order screenshot); stop at the first order screenshot."""
+    if not await chat_needs_order_id(label, customer) and not await chat_needs_product(label, customer):
         return
     rows = await db().fetch(
         "SELECT id, media_id FROM wa_messages WHERE number_label=$1 AND customer_phone=$2 AND direction='in' "
@@ -3019,6 +3055,8 @@ async def read_new_screenshots(cfg: Dict[str, Any], label: str, customer: str, s
                 await save_extracted_order(label, customer, {"order_id": got["order_id"], "quantity": got.get("quantity", ""),
                                                             "source": "screenshot"})
             break
+        if got and got.get("order_page") and got.get("product"):
+            break  # the product is known now (the Order ID was typed earlier)
 
 
 async def bot_input(cfg: Dict[str, Any], label: str, customer: str, since: datetime) -> str:
@@ -3515,7 +3553,8 @@ BOT_TURN_SYSTEM = (
     "work out what each value means.\n"
     "Return ONLY a JSON object with these keys (empty string when not given in the NEW messages):\n"
     "- order_id: the marketplace order/sub-order ID exactly as written (e.g. 123456789012_1, OD4321...).\n"
-    "- product_name: the name/text to print or emboss (not the customer's own name unless they want it printed).\n"
+    "- product_name: the name/text to print or emboss (not the customer's own name unless they want it printed), "
+    "exactly as written, keeping emojis, hearts and symbols (\"Prashanth ❤️‍\U0001FA79\" stays as it is).\n"
     "- colour: the colour they chose.\n"
     "- charm: the charm they chose exactly as given; if it's a number keep just the number (\"charm no. 12\" -> \"12\"). "
     "Several charms for one item: separate them with commas (\"12, 46\"). For a combo with a charm per item use "
@@ -3657,7 +3696,7 @@ async def fill_late_details(label, customer, fields, *, corrections=()):
             del supplied["order_date"]
     async with db().acquire() as conn, conn.transaction():
         rows = await conn.fetch(
-            f"SELECT {ORDER_SELECT} FROM orders WHERE channel=$1 AND customer_phone=$2 AND source <> 'screenshot' "
+            f"SELECT {ORDER_SELECT} FROM orders WHERE channel=$1 AND customer_phone=$2 AND source NOT IN ('screenshot','pending') "
             "AND ($3='' OR upper(replace(trim(order_id),'-','_'))=upper(replace($3,'-','_'))) "
             "ORDER BY id LIMIT 2 FOR UPDATE", label, customer, oid)
         if len(rows) != 1:
@@ -3778,7 +3817,7 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     # The bot never restarts the order or asks for the Order ID again (unless they send a different ID / a new order).
     known = await db().fetchrow(
         f"SELECT {ORDER_SELECT} FROM orders WHERE channel=$1 AND customer_phone=$2 AND order_id NOT LIKE 'wa-%' "
-        "AND source <> 'screenshot' ORDER BY created_at DESC LIMIT 1", biz, customer)
+        "AND source NOT IN ('screenshot','pending') ORDER BY created_at DESC LIMIT 1", biz, customer)
     conv_id = (conv["fields"] or {}).get("order_id") if conv else ""
     other_ids = [i for i in detect_ids(cleaned) if not known or norm_id(i) != norm_id(known["order_id"])]
     if known and not other_ids and not conv_id and not s_code and not NEW_ORDER_RE.search(cleaned):
@@ -3857,7 +3896,11 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
     if action == "answer" and not (set(understood) - {"order_id"}):
         await send_wa(cfg, customer, answer)
         return
-    if (action == "silent" and not ids) or (courtesy and not understood):  # an order ID (typed or read from a screenshot) is never ignored
+    step = next_step(fields)
+    ready = step >= len(STEP_KEYS) or (FEWER_FOLLOWUPS and STEP_KEYS[step] == "notes")
+    # an order ID (typed or read from a screenshot) is never ignored, and neither is a message that completes the order
+    # (e.g. "Kada" naming the product: nothing else is needed, so it's saved even if the AI chose to stay quiet)
+    if ((action == "silent" and not ids) or (courtesy and not understood)) and not (ready and fields.get("order_id")):
         return
     if not turn and has_outbound and not ids and not labelled and ("?" in cleaned or is_new):
         return
@@ -3866,8 +3909,9 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
         # asks its current question again below, so it never strays from taking the order.
         pass
     elif understood:
-        if fields.get("_product") and not fields.get("_colour_ok"):
-            understood.pop("colour", None)  # colour changes only for wallets, purses, clutches, passport covers
+        # (a colour the customer states is kept for any product, e.g. a silver kada; the bot only never asks for one)
+        if understood.get("product_name"):
+            understood["product_name"] = keep_emojis(understood["product_name"], said)
         if fields.get("_no_charm") and "logo" not in (understood.get("charm") or "").lower():
             understood.pop("charm", None)  # Rule: no charm on keychains, pens, bracelets... ("CA" there is part of the name)
         if understood.get("charm") and not_a_charm(understood["charm"]):
@@ -3946,7 +3990,7 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
             "order_date": fields.get("order_date"),
         }
         pre_id = await db().fetchval(
-            "SELECT id FROM orders WHERE channel=$1 AND customer_phone=$2 AND source='screenshot' "
+            "SELECT id FROM orders WHERE channel=$1 AND customer_phone=$2 AND source IN ('screenshot','pending') "
             "AND upper(regexp_replace(order_id,'[^A-Za-z0-9]','','g'))=$3 ORDER BY created_at LIMIT 1",
             biz, customer, norm_id(base["order_id"]))
 
@@ -4027,6 +4071,11 @@ async def handle_bot_message(cfg: Dict[str, Any], customer: str, text: str):
         answer = "\n\n".join(filter(None, (answer, await localize_reply(S_CODE_REPLY, language))))
         fields.pop("_guide_sent", None)  # show the Order ID picture again
     await db().execute(UPSERT_CONV_SQL, biz, customer, step, fields)
+    # Rule: once the Order ID is known it's in Orders straight away ("in progress"), so staff and Label Studio see
+    # it even if the customer stops replying; the bot fills in the rest when it arrives.
+    if fields.get("order_id") and not fields["order_id"].startswith("wa-") and not S_CODE_RE.fullmatch(fields["order_id"]):
+        await save_extracted_order(biz, customer, {"order_id": fields["order_id"], "source": "pending",
+                                                   "product_name": fields.get("product_name", "")[:300]})
     await prompt_for_details(cfg, customer, fields, step, language, answer)
 
 
@@ -4104,6 +4153,8 @@ async def follow_up(cfg: Dict[str, Any], customer: str, order: asyncpg.Record, t
         understood = pattern_details(said)
     understood.pop("order_id", None)
     understood.pop("order_date", None)
+    if understood.get("product_name"):
+        understood["product_name"] = keep_emojis(understood["product_name"], said)
     m = PREFIX_RE.search(said)
     if m:
         prefix = m.group(1).strip()
@@ -4220,7 +4271,7 @@ async def save_extracted_order(label: str, customer: str, row: Dict[str, str]) -
             {"source": "whatsapp", **row, "channel": label, "customer_phone": customer}
         )
     changes = {f: row[f] for f in ("product_name", "colour", "charm", "quantity", "notes") if row.get(f) and not existing[f]}
-    if changes and existing["source"] == "screenshot":
+    if changes and existing["source"] in PARTIAL_SOURCES and row.get("source") not in PARTIAL_SOURCES:
         changes["source"] = "whatsapp"
     if row.get("order_date") and not existing["order_date"]:
         changes["order_date"] = parse_order_date(row["order_date"])
@@ -4412,7 +4463,7 @@ async def process_value(cfg: Dict[str, Any], value: Dict[str, Any]) -> None:
         if msg.get("group_id") or await bot_stays_out(customer):
             continue  # group message or saved contact: stored in Chats only; the bot never replies or reads
         if kind == "image" and not text.strip() and (
-                await chat_needs_order_id(label, customer) or await db().fetchval(
+                await chat_needs_order_id(label, customer) or await chat_needs_product(label, customer) or await db().fetchval(
                     "SELECT 1 FROM wa_conversations WHERE business_number_id=$1 AND customer_phone=$2 "
                     "AND fields ? '_logo_ok'", label, customer)):
             text = "[photo]"  # wakes the bot; the photo itself is read later, after the customer pauses

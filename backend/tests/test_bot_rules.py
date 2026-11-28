@@ -404,9 +404,38 @@ try:
         msg("q1", Q, "357900000000000888")
         r = wait_n(Q, 1)
         check("screenshot of this order" in r[-1], "typed ID, product unknown: asks once more for the screenshot", r[-1:])
+        o = orders(Q)
+        check(len(o) == 1 and o[0]["order_id"] == "357900000000000888" and o[0]["source"] == "pending",
+              "a typed Order ID is in Orders straight away, marked in progress", o)
         msg("q2", Q, "I don't have it")
         r = wait_n(Q, 2)
         check(server.PRODUCT_QUESTION in r[-1] and "screenshot" not in r[-1], "then asks which product (screenshot asked only once)", r[-1:])
+
+        print("Typed ID, then the screenshot the bot asked for")
+        M2 = "919000000320"
+        BOT_TURNS[M2] = [{"order_id": "357900000000002222", "product_name": "Test Khan", "action": "collect"}, {"action": "collect"}]
+        msg("m21", M2, "#357900000000002222\nTest Khan")
+        r = wait_n(M2, 1)
+        check("screenshot of this order" in r[-1] and orders(M2) and orders(M2)[0]["product_name"] == "Test Khan",
+              "typed ID + name: saved in progress, asks for the screenshot", (orders(M2), r[-1:]))
+        OCR_TEXT["MP"] = "Order #357900000000002222\nCustomised Glitered Pen with Name\nmeesho"
+        msg("m22", M2, image="MP")
+        r = wait_n(M2, 2)
+        o = orders(M2)
+        check(len(o) == 1 and o[0]["source"] == "whatsapp" and o[0]["product_name"] == "Test Khan" and not o[0]["charm"]
+              and "saved" in r[-1].lower(), "the screenshot is read even though the ID was typed: pen known, saved, no charm",
+              (o, r[-1:], c.portal.call(server.db().fetch, "SELECT kind, ai_note, media_id FROM wa_messages WHERE customer_phone=$1 AND direction='in'", M2),
+               c.portal.call(server.db().fetchval, "SELECT fields FROM wa_conversations WHERE customer_phone=$1", M2),
+               c.portal.call(server.chat_needs_product, "Shop M", M2)))
+        S2 = "919000000321"
+        BOT_TURNS[S2] = [{"order_id": "358100000000001111", "product_name": "Anshi", "action": "collect"}, {"action": "silent"}]
+        msg("s21", S2, "Order I'd 358100000000001111\nName anshi")
+        wait_n(S2, 1)
+        msg("s22", S2, "Kangan size 2 by 14")
+        r = wait_n(S2, 2)
+        o = orders(S2)
+        check(o and o[0]["source"] == "whatsapp" and not o[0]["charm"] and "saved" in r[-1].lower() and "charm" not in r[-1].lower(),
+              "'Kangan' names the product (a kada): saved even though the AI stayed quiet, no charm", (o, r[-1:]))
         print("Bot pause in one chat")
         Z = "919000000318"
         BOT_TURNS[Z] = [{"action": "collect"}]

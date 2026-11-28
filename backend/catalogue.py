@@ -37,7 +37,7 @@ _RX = [
     ("keychain", r"key\s*-?\s*(?:chain|ring)|keytchain|keyring"),
     ("pen", r"\bpens?\b"),
     ("bottle", r"\bbottles?\b|sipper|flask|tumbler"),
-    ("bracelet", r"bracelet|braclet|\bkada\b"),
+    ("bracelet", r"bracelet|braclet|bracellet|\bkad(?:a|aa|e)\b|\bkangan\b|\bkangna\b|\bbangles?\b"),
     ("rakhi", r"rakhi"),
     ("chain", r"neck\s*chain|\bchain\b(?!\s*&)|pendant|locket|necklace"),
     ("card holder", r"card\s*holder"),

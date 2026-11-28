@@ -67,6 +67,13 @@ try:
     check(C("357444445555666677_1") == "357444445555666677_1", "Meesho _1 kept")
     check(C("wa-1a2b3c4d") == "wa-1a2b3c4d", "placeholder IDs untouched")
 
+    print("Names keep the customer's emojis")
+    said = "Outside name Prashanth ❤️‍\U0001FA79\nInside name chinnu\U0001F618"
+    check(server.keep_emojis("Outside: Prashanth | Inside: chinnu", said) == "Outside: Prashanth ❤️‍\U0001FA79 | Inside: chinnu\U0001F618",
+          "emojis the AI dropped are put back on each name")
+    check(server.keep_emojis("Aarav", "name Aarav") == "Aarav" and server.keep_emojis("VINAY ♥ VARSHA", "VINAY ♥ VARSHA") == "VINAY ♥ VARSHA",
+          "names without emojis, or already with them, stay the same")
+
     print("Catalogue match for a cut-off screenshot title")
     import catalogue as cat
     listings = [{"title": "Latest Gift Pack of Customised wallet & Glitered Pen for Men Green", "sku": "A"},

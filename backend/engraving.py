@@ -209,7 +209,7 @@ def txt_section(item: str, title: str) -> str:
         return "leather"
     if item in ("metal keychain", "keychain"):
         return metal_kind(title)
-    if item == "bracelet" and re.search(r"\bkada\b|\bkadaa\b|\bkara\b", (title or "").lower()):
+    if item == "bracelet" and re.search(r"\bkad(?:a|aa|e)\b|\bkara\b|\bkangan\b|\bkangna\b", (title or "").lower()):
         return "kada"  # a kada is engraved separately from bracelets
     return TXT_ITEM.get(item, "")
 

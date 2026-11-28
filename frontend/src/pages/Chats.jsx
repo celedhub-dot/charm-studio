@@ -361,15 +361,19 @@ function OrderEditor({ order, onSaved, onConfirm, onRemove }) {
   const [askRemove, setAskRemove] = useState(false);
   const [form, setForm] = useState(order);
   const [saving, setSaving] = useState(false);
+  const synced = useRef(order); // the server values the form was last filled from
   const dirty = ORDER_FIELDS.some((k) => (form[k] || "") !== (order[k] || ""));
-  // The thread refreshes every few seconds with fresh objects. Only take the
-  // server's values when they really changed, and never over unsaved typing.
+  // The thread refreshes every few seconds with fresh objects. Take the server's new values (e.g. the bot just
+  // saved the name) unless someone has typed in this card since it was last filled; only the fields they typed
+  // in are kept.
   const serverKey = ORDER_FIELDS.map((k) => order[k] || "").join("\u0000");
   const lastKey = useRef(serverKey);
   useEffect(() => {
     if (serverKey === lastKey.current) return;
     lastKey.current = serverKey;
-    if (!dirty) setForm(order);
+    const typed = ORDER_FIELDS.filter((k) => (form[k] || "") !== (synced.current[k] || ""));
+    setForm({ ...order, ...Object.fromEntries(typed.map((k) => [k, form[k]])) });
+    synced.current = order;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverKey]);
 
