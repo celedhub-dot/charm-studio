@@ -257,6 +257,32 @@ async def check_language():
 asyncio.run(check_language())
 print("ALL OK (opening language persistence and localized reply templates)")
 
+async def check_language_switch():
+    db = AsyncMock()
+    db.fetch.return_value = [{"body": "Mujhe wallet chahiye"}, {"body": "Naam kya likhna hai"}, {"body": "Please write Rahul on it"}]
+    db.fetchval.return_value = "Roman Hinglish"  # what the chat used so far
+    model = AsyncMock(return_value='{"language":"English"}')
+    with patch.object(server, "db", return_value=db), patch.object(server, "ai_ready", return_value=True), patch.object(server, "claude_text", model):
+        got = await real_chat_language("desk", "customer", "Please write Rahul on it, thank you so much")
+        assert got == "English", got  # the customer switched: the bot follows
+        assert any("reply_language" in str(c) for c in db.execute.await_args_list), "new language remembered"
+        assert "LATEST" in model.await_args.args[0] and "Roman Hinglish" in model.await_args.args[0], "asks for the latest message's language"
+        model.reset_mock()
+        assert await real_chat_language("desk", "customer", "357100000000000001") == "Roman Hinglish"  # an ID: no words
+        assert await real_chat_language("desk", "customer", "ok \U0001F44D") == "Roman Hinglish"  # 'ok' + emoji
+        model.assert_not_awaited()
+    assert server.has_words("Mera naam Ravi hai") and not server.has_words("OD439260793774928100") and not server.has_words("Thank you")
+    # regional languages get the English version below; English, Hindi and Hinglish don't
+    assert server.with_english("Telugu") and not server.with_english("English") and not server.with_english("Roman Hinglish") \
+        and not server.with_english("Hindi (Devanagari)")
+    server._reply_translations.clear()
+    with patch.object(server, "claude_text", AsyncMock(return_value='["మీ ఆర్డర్ {order_id} సేవ్ అయింది."]')):
+        t = await server.localize_reply("Your order {order_id} is saved.", "Telugu")
+    assert t.endswith("\n\nYour order {order_id} is saved.") and t.startswith("మీ"), t
+
+asyncio.run(check_language_switch())
+print("ALL OK (reply language follows the customer when they switch)")
+
 async def check_ack_and_translation():
     with patch.object(server, "chat_language", AsyncMock(return_value="")) as language:
         messages, fields, orders = await run(["Okay", "OK, thanks! 👍", "🙏"])
