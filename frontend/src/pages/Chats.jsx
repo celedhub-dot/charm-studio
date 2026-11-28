@@ -16,6 +16,7 @@ import {
   ChatsTeardrop,
   Clock,
   Copy,
+  Trash,
   Package,
   Plus,
   FileText,
@@ -39,6 +40,7 @@ import {
   deleteChat,
   getUnread,
   updateOrder,
+  deleteOrder,
   createOrder,
   waNumbers,
   setBotPaused,
@@ -353,7 +355,10 @@ function MessageList({ messages, namePrefix, contactName }) {
 }
 
 /* ---------- Orders panel ---------- */
-function OrderEditor({ order, onSaved, onConfirm }) {
+const isBlankOrder = (o) => ORDER_FIELDS.every((k) => !(o[k] || "").trim());
+
+function OrderEditor({ order, onSaved, onConfirm, onRemove }) {
+  const [askRemove, setAskRemove] = useState(false);
   const [form, setForm] = useState(order);
   const [saving, setSaving] = useState(false);
   const dirty = ORDER_FIELDS.some((k) => (form[k] || "") !== (order[k] || ""));
@@ -404,6 +409,23 @@ function OrderEditor({ order, onSaved, onConfirm }) {
         >
           <Copy size={12} /> Copy ID
         </button>
+        {onRemove && (askRemove ? (
+          <span className="inline-flex items-center gap-1 text-[11px]">
+            Remove?
+            <button type="button" className="rounded bg-danger px-1.5 py-0.5 font-semibold text-white" onClick={() => onRemove(order)} data-testid={`order-remove-yes-${order.id}`}>Yes</button>
+            <button type="button" className="rounded border border-line px-1.5 py-0.5" onClick={() => setAskRemove(false)}>No</button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-danger"
+            onClick={() => (isBlankOrder(order) ? onRemove(order) : setAskRemove(true))}
+            title={isBlankOrder(order) ? "Remove this empty entry" : "Remove this order"}
+            data-testid={`order-remove-${order.id}`}
+          >
+            <Trash size={12} /> Remove
+          </button>
+        ))}
       </div>
       {[
         ["order_id", "Order ID", "font-mono"],
@@ -477,6 +499,23 @@ function OrdersPanel({ thread, onChanged, onConfirm, onClose }) {
   const [reading, setReading] = useState(false);
   const [adding, setAdding] = useState(false);
   const { contact, orders } = thread;
+  const { me } = useSession();
+  const owner = me?.role !== "employee"; // removing orders is for the owner
+  const blanks = orders.filter(isBlankOrder);
+
+  const remove = async (o, quiet = false) => {
+    try {
+      await deleteOrder(o.id);
+      if (!quiet) toast.success(isBlankOrder(o) ? "Empty entry removed" : "Order removed");
+      onChanged();
+    } catch (e) {
+      toast.error(errorMessage(e));
+    }
+  };
+  const removeBlanks = async () => {
+    for (const o of blanks) await remove(o, true);
+    toast.success(`Removed ${blanks.length} empty entr${blanks.length === 1 ? "y" : "ies"}`);
+  };
 
   const readAgain = async () => {
     setReading(true);
@@ -517,6 +556,11 @@ function OrdersPanel({ thread, onChanged, onConfirm, onClose }) {
           <div className="text-[15px] font-medium text-ink">Order details</div>
         </div>
         <div className="flex gap-1">
+          {owner && blanks.length > 0 && (
+            <Button size="sm" variant="ghost" className="text-danger" onClick={removeBlanks} title="Remove every empty order entry in this chat" data-testid="orders-remove-blanks-btn">
+              <Trash size={14} /> {blanks.length} empty
+            </Button>
+          )}
           <Button size="sm" variant="ghost" onClick={readAgain} disabled={reading} title="Read the chat again" data-testid="orders-read-again-btn">
             {reading ? <Spinner /> : <ArrowsClockwise size={14} />} Read chat
           </Button>
@@ -532,7 +576,7 @@ function OrdersPanel({ thread, onChanged, onConfirm, onClose }) {
             <b>Read chat</b> or <b>+</b>.
           </p>
         ) : (
-          orders.map((o) => <OrderEditor key={o.id} order={o} onSaved={onChanged} onConfirm={thread.number.can_send ? onConfirm : null} />)
+          orders.map((o) => <OrderEditor key={o.id} order={o} onSaved={onChanged} onConfirm={thread.number.can_send ? onConfirm : null} onRemove={owner ? remove : null} />)
         )}
         <Link to="/labels" className="block text-center text-xs font-medium text-forest hover:underline">
           Stamp these on labels in Label Studio →
