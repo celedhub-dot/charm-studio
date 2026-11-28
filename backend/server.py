@@ -6312,5 +6312,5 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Matched-Pages", "X-Not-Found-Pages", "X-Order-Dates-Saved", "Content-Disposition"],
+    expose_headers=["X-Matched-Pages", "X-Not-Found-Pages", "X-Order-Dates-Saved", "Content-Disposition", "X-Rows"],
 )
